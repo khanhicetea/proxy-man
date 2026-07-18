@@ -446,6 +446,12 @@ proxy_connect_timeout 10s;
 proxy_send_timeout 60s;
 proxy_read_timeout 60s;
 proxy_buffering on;
+
+# Do not expose hidden files or directories through the upstream. Keep the
+# standardized .well-known namespace available for ACME and application use.
+location ~ /\.(?!well-known(?:/|$)) {
+    return 404;
+}
 EOF
 
   # The map must be loaded at http scope. Known crawlers are checked before the
