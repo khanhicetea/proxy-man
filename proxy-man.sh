@@ -341,8 +341,7 @@ http {
 
     log_format proxy_timing '\$remote_addr - \$remote_user [\$time_local] "\$request" '
                             '\$status \$body_bytes_sent "\$http_referer" "\$http_user_agent" '
-                            'host=\$host request_time=\$request_time '
-                            'upstream=\$upstream_addr connect=\$upstream_connect_time '
+                            'request_time=\$request_time connect=\$upstream_connect_time '
                             'header=\$upstream_header_time response=\$upstream_response_time';
     access_log "$LOG_DIR/access.log" proxy_timing;
 

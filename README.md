@@ -203,7 +203,7 @@ X-Forwarded-Proto
 X-Forwarded-Port
 ```
 
-WebSocket mode additionally forwards `Upgrade` and `Connection`. Nginx's access format records `$request_time`, `$upstream_addr`, `$upstream_connect_time`, `$upstream_header_time`, and `$upstream_response_time`.
+WebSocket mode additionally forwards `Upgrade` and `Connection`. Nginx's access format records `$request_time`, `$upstream_connect_time`, `$upstream_header_time`, and `$upstream_response_time`.
 
 TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 suites. Client cipher preference is retained so mobile clients without fast AES hardware can select ChaCha20, while clients with AES acceleration can use AES-GCM. X25519 is the preferred key-exchange group, with P-256 and P-384 fallbacks. The shared session cache provides stateful resumption while persistent session tickets remain disabled.
 
