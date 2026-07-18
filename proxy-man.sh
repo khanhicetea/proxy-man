@@ -351,11 +351,19 @@ http {
     gzip_min_length 1024;
     gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
 
+    # Modern mobile clients can choose ChaCha20 when AES acceleration is weak,
+    # while AES-GCM remains fast on devices with hardware support.
     ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_conf_command Ciphersuites 'TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384';
+    ssl_ecdh_curve X25519:prime256v1:secp384r1;
+    ssl_prefer_server_ciphers off;
+
+    # Shared stateful resumption avoids repeated handshakes without persistent
+    # session-ticket keys; this also supports TLS 1.3 resumption in OpenSSL.
     ssl_session_cache shared:SSL:20m;
     ssl_session_timeout 1d;
     ssl_session_tickets off;
-    ssl_prefer_server_ciphers off;
 
     map \$http_upgrade \$connection_upgrade {
         default upgrade;

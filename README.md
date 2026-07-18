@@ -7,7 +7,7 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - Installs stable Nginx from nginx.org on apt, dnf, or yum systems
 - Installs the latest lego release for amd64, arm64, armv7, or 386
 - Tunes file-descriptor limits, listen queues, connection backlog, and TCP lifecycle settings
-- HTTP/2 and HTTP/3 (QUIC), TLS 1.2/1.3, gzip, and optimized worker settings
+- HTTP/2 and HTTP/3 (QUIC), tuned TLS 1.2/1.3, gzip, and optimized worker settings
 - Catch-all HTTP/HTTPS host that returns 404
 - Long-lived self-signed default certificate, also used by new proxies until ACME succeeds
 - Reverse-proxy headers for client IP, forwarded host, port, and scheme
@@ -176,6 +176,8 @@ X-Forwarded-Port
 ```
 
 WebSocket mode additionally forwards `Upgrade` and `Connection`. Nginx's access format records `$request_time`, `$upstream_addr`, `$upstream_connect_time`, `$upstream_header_time`, and `$upstream_response_time`.
+
+TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 suites. Client cipher preference is retained so mobile clients without fast AES hardware can select ChaCha20, while clients with AES acceleration can use AES-GCM. X25519 is the preferred key-exchange group, with P-256 and P-384 fallbacks. The shared session cache provides stateful resumption while persistent session tickets remain disabled.
 
 ## Operational notes
 
