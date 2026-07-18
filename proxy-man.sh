@@ -46,10 +46,13 @@ usage() {
 Usage: ./proxy-man.sh <command> [arguments]
 
 Commands:
-  install                 Install stable nginx.org Nginx and the latest lego
+  install                 Install Nginx, lego, and GoAccess
   init                    Create an optimized Nginx configuration
   proxy [domain] [url]    Create conf.d/<domain>.conf
+  list                    List configured domains and ACME status
   acme [domain]           Issue an HTTP-01 certificate with lego
+  analyze [domain]        Analyze a domain access log in the GoAccess TUI
+  goaccess [domain]       Alias for analyze
   cron                    Renew all recorded certificates when due
   help                    Show this help
 EOF
@@ -147,7 +150,7 @@ install_nginx_apt() {
   [[ -n "$codename" ]] || die "Could not determine the distribution codename."
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg openssl tar dnsutils
+  DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg openssl tar dnsutils goaccess
   install -d -m 0755 /usr/share/keyrings
   curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor --yes -o /usr/share/keyrings/nginx-archive-keyring.gpg
   printf 'deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/%s %s nginx\n' \
@@ -175,6 +178,11 @@ gpgkey=https://nginx.org/keys/nginx_signing.key
 module_hotfixes=true
 EOF
   "$manager" install -y nginx
+  if ! "$manager" install -y goaccess; then
+    log "GoAccess was not found in the enabled repositories; enabling EPEL..."
+    "$manager" install -y epel-release
+    "$manager" install -y goaccess
+  fi
 }
 
 tune_os_for_nginx() {
@@ -259,6 +267,7 @@ command_install() {
   tune_os_for_nginx
   log "Installed $(nginx -v 2>&1)"
   log "Installed $(lego --version 2>&1)"
+  log "Installed GoAccess."
   log "Next: run '$0 init'."
 }
 
@@ -475,6 +484,50 @@ EOF
   fi
 }
 
+install_and_configure_logrotate() {
+  # Development trees should remain self-contained and must not modify /etc.
+  if [[ "$NGINX_DIR" != /etc/* && "$NGINX_DIR" != /usr/* && "$NGINX_DIR" != /var/* ]]; then
+    log "Skipping system logrotate setup for development NGINX_DIR=$NGINX_DIR."
+    return 0
+  fi
+
+  if ! command -v logrotate >/dev/null 2>&1; then
+    log "Installing logrotate..."
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y logrotate
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y logrotate
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y logrotate
+    else
+      die "Could not install logrotate: no supported package manager was found."
+    fi
+  fi
+
+  # Replace the package's broad Nginx rule rather than creating an overlapping
+  # rule. All access logs (including per-domain logs) live in this directory.
+  cat > /etc/logrotate.d/nginx <<EOF
+"$LOG_DIR/*.log" {
+    daily
+    maxsize 100M
+    rotate 2
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        if [ -s "$NGINX_PID" ]; then
+            kill -USR1 "\$(cat "$NGINX_PID")" 2>/dev/null || true
+        fi
+    endscript
+}
+EOF
+  chmod 0644 /etc/logrotate.d/nginx
+  log "Configured logrotate for $LOG_DIR/*.log (100 MiB maximum, 2 rotations)."
+}
+
 write_default_host() {
   cat > "$CONF_DIR/00-default.conf" <<EOF
 server {
@@ -527,6 +580,7 @@ command_init() {
     log "Disabled the package's default.conf to avoid a default-server conflict."
   fi
   write_default_host
+  install_and_configure_logrotate
   touch "$DOMAIN_FILE"
   chmod 0644 "$DOMAIN_FILE"
 
@@ -640,6 +694,7 @@ server {
     ssl_certificate_key "$SSL_DIR/$domain/privkey.pem";$ws_headers
 
     location / {$ws_buffering
+        access_log "$LOG_DIR/$domain.access.log" proxy_timing buffer=64k flush=60s;
         proxy_pass $upstream;
     }$cache_location
 }
@@ -657,6 +712,51 @@ EOF
   [[ -n "$backup" ]] && rm -f "$backup"
   log "Created proxy https://$domain -> $upstream in $config"
   log "The self-signed certificate is active until '$0 acme $domain' succeeds."
+}
+
+command_list() {
+  [[ -d "$CONF_DIR" ]] || die "Run '$0 init' first."
+
+  local file domain acme width=6
+  local -a domains=()
+  shopt -s nullglob
+  for file in "$CONF_DIR"/*.conf; do
+    domain=${file##*/}
+    domain=${domain%.conf}
+    if validate_domain "$domain"; then
+      domains+=("$domain")
+      (( ${#domain} > width )) && width=${#domain}
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%-*s  %s\n' "$width" DOMAIN ACME
+  printf '%-*s  %s\n' "$width" "$(printf '%*s' "$width" '' | tr ' ' '-')" '----'
+  for domain in "${domains[@]}"; do
+    acme=no
+    if [[ -f "$DOMAIN_FILE" ]] && grep -Fxiq -- "$domain" "$DOMAIN_FILE"; then
+      acme=yes
+    fi
+    printf '%-*s  %s\n' "$width" "$domain" "$acme"
+  done
+}
+
+command_analyze() {
+  command -v goaccess >/dev/null 2>&1 || die "GoAccess is not installed. Run '$0 install' first."
+
+  local domain=${1:-} access_log
+  [[ -n "$domain" ]] || domain=$(prompt_value "Domain to analyze")
+  domain=${domain,,}
+  validate_domain "$domain" || die "Invalid domain: $domain"
+  [[ -f "$CONF_DIR/$domain.conf" ]] || die "No proxy configuration exists for $domain."
+
+  access_log="$LOG_DIR/$domain.access.log"
+  [[ -f "$access_log" ]] || die "No access log exists for $domain yet: $access_log"
+  [[ -r "$access_log" ]] || die "Access log is not readable; run this command with sufficient permissions."
+
+  # proxy_timing starts with the standard Nginx combined format; GoAccess
+  # safely ignores the timing fields appended after the User-Agent.
+  goaccess "$access_log" --log-format=COMBINED
 }
 
 check_dns_a() {
@@ -810,7 +910,9 @@ main() {
     install) command_install "$@" ;;
     init) command_init "$@" ;;
     proxy) command_proxy "$@" ;;
+    list) command_list "$@" ;;
     acme) command_acme "$@" ;;
+    analyze|goaccess) command_analyze "$@" ;;
     cron) command_cron "$@" ;;
     help|-h|--help) usage ;;
     *) usage >&2; die "Unknown command: $command" ;;

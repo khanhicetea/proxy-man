@@ -4,7 +4,7 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 
 ## Features
 
-- Installs stable Nginx from nginx.org on apt, dnf, or yum systems
+- Installs stable Nginx from nginx.org and the GoAccess terminal log analyzer on apt, dnf, or yum systems
 - Installs the latest lego release for amd64, arm64, armv7, or 386
 - Tunes file-descriptor limits, listen queues, connection backlog, and TCP lifecycle settings
 - HTTP/2 and HTTP/3 (QUIC), tuned TLS 1.2/1.3, gzip, and optimized worker settings
@@ -13,9 +13,10 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - Reverse-proxy headers for client IP, forwarded host, port, and scheme
 - Optional WebSocket forwarding
 - Optional public cache for static assets, plus an opt-in private cache zone
-- Access logs include request and upstream connection/header/response timings
+- Separate buffered access log per domain, including request and upstream timing data
+- Interactive per-domain traffic analysis with the GoAccess TUI
 - HTTP-01 certificate issuance after checking the domain's public A record
-- Domain registry and non-interactive renewal command for cron
+- Domain listing with ACME status, plus non-interactive certificate renewal for cron
 
 ## Requirements
 
@@ -63,7 +64,9 @@ Commands prompt for omitted values. Domain and upstream can also be supplied dir
 
 ```bash
 sudo ./proxy-man.sh proxy app.example.com http://127.0.0.1:3000
+sudo ./proxy-man.sh list
 sudo ./proxy-man.sh acme app.example.com
+sudo ./proxy-man.sh analyze app.example.com
 ```
 
 ### `install`
@@ -72,7 +75,7 @@ sudo ./proxy-man.sh acme app.example.com
 sudo ./proxy-man.sh install
 ```
 
-Adds the official stable nginx.org repository, installs Nginx and DNS/TLS utilities, then downloads the latest lego binary to `/usr/local/bin/lego`.
+Adds the official stable nginx.org repository, installs Nginx, GoAccess, and DNS/TLS utilities, then downloads the latest lego binary to `/usr/local/bin/lego`. On RHEL-compatible systems, EPEL is enabled if GoAccess is not already available.
 
 It also installs production proxy tuning in:
 
@@ -90,7 +93,9 @@ These settings raise Nginx's open-file limit to 65,535 and tune socket queues, e
 sudo ./proxy-man.sh init
 ```
 
-Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. The upstream template contains commented examples using documentation-only test IPs and upstream keepalive settings; later `init` runs preserve it so configured upstreams are not lost. An existing `nginx.conf` is backed up with a timestamp. The package's `conf.d/default.conf`, when present, is renamed with a `.disabled.<timestamp>` suffix to prevent a default-server conflict. On a production `/etc/nginx` installation, Nginx is enabled and restarted after a successful configuration test.
+Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. It also installs logrotate when needed and writes `/etc/logrotate.d/nginx` for system configuration roots. Nginx logs are checked daily, rotated once they reach 100 MiB, compressed, and limited to two retained rotations; Nginx is signaled to reopen its logs after rotation. Development trees outside `/etc`, `/usr`, and `/var` skip system logrotate setup.
+
+The upstream template contains commented examples using documentation-only test IPs and upstream keepalive settings; later `init` runs preserve it so configured upstreams are not lost. An existing `nginx.conf` is backed up with a timestamp. The package's `conf.d/default.conf`, when present, is renamed with a `.disabled.<timestamp>` suffix to prevent a default-server conflict. On a production `/etc/nginx` installation, Nginx is enabled and restarted after a successful configuration test.
 
 Important generated paths (using the production default `NGINX_DIR=/etc/nginx`):
 
@@ -104,6 +109,7 @@ Important generated paths (using the production default `NGINX_DIR=/etc/nginx`):
 /etc/nginx/ssl/default/
 /etc/nginx/acme-webroot/
 /etc/nginx/acme-domains.txt
+/etc/logrotate.d/nginx
 /var/log/nginx/
 /var/cache/nginx/public_zone/
 /var/cache/nginx/private_zone/
@@ -124,13 +130,29 @@ Prompts for:
 3. WebSocket support
 4. Static asset caching
 
-It creates exactly one file at `conf.d/<domain>.conf`. HTTP requests redirect to HTTPS except for the ACME challenge path. Shared HTTPS listener, protocol, header, timeout, and buffering directives are inherited from `snippets/proxy-host.conf`; the per-domain file keeps the domain, certificate paths, upstream, and enabled option overrides. The HTTPS proxy initially uses a copy of the default self-signed certificate, so Nginx remains valid before a public certificate is issued.
+It creates exactly one file at `conf.d/<domain>.conf`. HTTP requests redirect to HTTPS except for the ACME challenge path. Shared HTTPS listener, protocol, header, timeout, and buffering directives are inherited from `snippets/proxy-host.conf`; the per-domain file keeps the domain, certificate paths, upstream, and enabled option overrides. Requests handled by the primary HTTPS `location /` are written to `/var/log/nginx/<domain>.access.log` (or `logs/<domain>.access.log` under a development `NGINX_DIR`), using a 64 KiB buffer flushed at least every 60 seconds. The HTTPS proxy initially uses a copy of the default self-signed certificate, so Nginx remains valid before a public certificate is issued.
 
 User-Agent bot filtering is available but disabled by default. Each generated `conf.d/<domain>.conf` contains a commented include for `snippets/block-bot.conf`; review `snippets/block-bot-map.conf`, then uncomment that per-host include to return HTTP 403 for empty User-Agents, unknown bot/crawler identifiers, and common automation clients. Known search, social, and AI crawlers are allowed before the generic bot rule. User-Agent values are trivial to spoof, so use rate limiting or a WAF when stronger protection is required.
 
-With static caching enabled, common image, font, CSS, and JavaScript extensions use the shared `public_zone` cache. Successful responses are cached for 30 days, while 301 and 302 redirects are cached for 4 hours. Static access logging is disabled. Remove cached files manually after an urgent asset replacement, or use versioned asset URLs.
+With static caching enabled, common image, font, CSS, and JavaScript extensions use the shared `public_zone` cache. Successful responses are cached for 30 days, while 301 and 302 redirects are cached for 4 hours. Static-route access logging is disabled, keeping the per-domain log focused on `location /`. Remove cached files manually after an urgent asset replacement, or use versioned asset URLs.
 
 The generated static-cache directive notes that `private_zone` can be used for private routes. Only enable it when upstream responses are safe to cache; a separate cache zone does not by itself make personalized or authenticated responses safe for caching.
+
+### `list`
+
+```bash
+sudo ./proxy-man.sh list
+```
+
+Lists every domain-named `conf.d/*.conf` file in a two-column table. The `ACME` column is `yes` when the domain is registered in `acme-domains.txt` for certificate renewal.
+
+### `analyze`
+
+```bash
+sudo ./proxy-man.sh analyze app.example.com
+```
+
+Opens the GoAccess terminal dashboard for the domain's current access log. `goaccess` is also accepted as a command alias for `analyze`. Omit the domain to be prompted. Exit the dashboard with `q`. Since writes are buffered for up to 60 seconds, the newest requests may take a short time to appear.
 
 ### `acme`
 
@@ -186,7 +208,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ## Operational notes
 
 - Back up `/etc/nginx` before first use on a server with an existing hand-written configuration.
-- `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, and the two `block-bot*.conf` snippets. It creates `upstreams.conf` only when missing, preserving later edits.
+- `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, the two `block-bot*.conf` snippets, and `/etc/logrotate.d/nginx` for system configuration roots. It creates `upstreams.conf` only when missing, preserving later edits.
 - `install` owns the `99-nginx-proxy-man` sysctl/limits files and the Nginx systemd limit override.
 - A proxy file is only removed automatically when Nginx rejects a newly created configuration. An existing proxy replacement is never performed without confirmation.
 - Certificate private keys are written with mode `0600`.
@@ -199,6 +221,8 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ./proxy-man.sh install
 ./proxy-man.sh init
 ./proxy-man.sh proxy [domain] [upstream-url]
+./proxy-man.sh list
 ./proxy-man.sh acme [domain]
+./proxy-man.sh analyze [domain]
 ./proxy-man.sh cron
 ```
