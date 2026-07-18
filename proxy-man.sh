@@ -327,6 +327,7 @@ events {
 
 http {
     include "$NGINX_DIR/mime.types";
+    include "$SNIPPET_DIR/block-bot-map.conf";
     default_type application/octet-stream;
 
     log_format proxy_timing '\$remote_addr - \$remote_user [\$time_local] "\$request" '
@@ -437,6 +438,35 @@ proxy_connect_timeout 10s;
 proxy_send_timeout 60s;
 proxy_read_timeout 60s;
 proxy_buffering on;
+EOF
+
+  # The map must be loaded at http scope. Known crawlers are checked before the
+  # generic deny rule, and ordinary browsers fall through to the allowed default.
+  cat > "$SNIPPET_DIR/block-bot-map.conf" <<'EOF'
+# User-Agent strings are self-reported and easily spoofed. This filter deters
+# basic crawlers; it is not authentication or a replacement for rate limiting.
+map $http_user_agent $block_bot {
+    default 0;
+
+    # Reject clients that omit User-Agent entirely.
+    "" 1;
+
+    # AI and LLM crawlers explicitly allowed by policy.
+    ~*(?:GPTBot|ChatGPT-User|OAI-SearchBot|ClaudeBot|Claude-User|Claude-SearchBot|anthropic-ai|PerplexityBot|Perplexity-User|CCBot|Meta-ExternalAgent|meta-externalfetcher|cohere-ai|Omgilibot|FacebookBot) 0;
+
+    # Major search, archive, preview, and social-media crawlers.
+    ~*(?:Googlebot|GoogleOther|Google-InspectionTool|AdsBot-Google|Mediapartners-Google|bingbot|BingPreview|MicrosoftPreview|Slurp|DuckDuckBot|Baiduspider|YandexBot|Sogou.*Spider|Exabot|ia_archiver|Applebot|facebookexternalhit|Facebot|Twitterbot|LinkedInBot|Pinterestbot|WhatsApp|TelegramBot|Discordbot|Slackbot|SkypeUriPreview) 0;
+
+    # Unknown bots and common scraping/automation clients.
+    ~*(?:bot|spider|crawl|scrap|python|curl|wget|aiohttp|httpx|http-client|go-http-client|libwww|perl|mechanize|scrapy|headlesschrome|phantomjs|selenium|puppeteer|playwright|apache-httpclient|okhttp|java/|node-fetch|axios|postmanruntime|insomnia|aws-sdk) 1;
+}
+EOF
+
+  # This server-scope snippet is intentionally opt-in from proxy-host.conf.
+  cat > "$SNIPPET_DIR/block-bot.conf" <<'EOF'
+if ($block_bot) {
+    return 403;
+}
 EOF
 
   # Keep legacy snippets while an existing host still includes either one.
@@ -601,6 +631,9 @@ server {
 
 server {
     include "$SNIPPET_DIR/proxy-host.conf";
+
+    # Optional UA filter; review block-bot-map.conf before enabling.
+    # include "$SNIPPET_DIR/block-bot.conf";
 
     server_name $domain;
     ssl_certificate "$SSL_DIR/$domain/fullchain.pem";

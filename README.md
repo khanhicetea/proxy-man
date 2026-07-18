@@ -99,6 +99,8 @@ Important generated paths (using the production default `NGINX_DIR=/etc/nginx`):
 /etc/nginx/conf.d/00-default.conf
 /etc/nginx/conf.d/upstreams.conf
 /etc/nginx/snippets/proxy-host.conf
+/etc/nginx/snippets/block-bot-map.conf
+/etc/nginx/snippets/block-bot.conf
 /etc/nginx/ssl/default/
 /etc/nginx/acme-webroot/
 /etc/nginx/acme-domains.txt
@@ -123,6 +125,8 @@ Prompts for:
 4. Static asset caching
 
 It creates exactly one file at `conf.d/<domain>.conf`. HTTP requests redirect to HTTPS except for the ACME challenge path. Shared HTTPS listener, protocol, header, timeout, and buffering directives are inherited from `snippets/proxy-host.conf`; the per-domain file keeps the domain, certificate paths, upstream, and enabled option overrides. The HTTPS proxy initially uses a copy of the default self-signed certificate, so Nginx remains valid before a public certificate is issued.
+
+User-Agent bot filtering is available but disabled by default. Each generated `conf.d/<domain>.conf` contains a commented include for `snippets/block-bot.conf`; review `snippets/block-bot-map.conf`, then uncomment that per-host include to return HTTP 403 for empty User-Agents, unknown bot/crawler identifiers, and common automation clients. Known search, social, and AI crawlers are allowed before the generic bot rule. User-Agent values are trivial to spoof, so use rate limiting or a WAF when stronger protection is required.
 
 With static caching enabled, common image, font, CSS, and JavaScript extensions use the shared `public_zone` cache. Successful responses are cached for 30 days, while 301 and 302 redirects are cached for 4 hours. Static access logging is disabled. Remove cached files manually after an urgent asset replacement, or use versioned asset URLs.
 
@@ -182,7 +186,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ## Operational notes
 
 - Back up `/etc/nginx` before first use on a server with an existing hand-written configuration.
-- `init` owns `nginx.conf`, `00-default.conf`, and `snippets/proxy-host.conf`. It creates `upstreams.conf` only when missing, preserving later edits.
+- `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, and the two `block-bot*.conf` snippets. It creates `upstreams.conf` only when missing, preserving later edits.
 - `install` owns the `99-nginx-proxy-man` sysctl/limits files and the Nginx systemd limit override.
 - A proxy file is only removed automatically when Nginx rejects a newly created configuration. An existing proxy replacement is never performed without confirmation.
 - Certificate private keys are written with mode `0600`.
