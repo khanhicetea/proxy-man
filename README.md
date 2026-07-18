@@ -2,6 +2,8 @@
 
 A small Bash tool for installing and managing an Nginx reverse-proxy server. It installs the official **stable nginx.org package**, creates an HTTP/2 and HTTP/3 configuration, manages one proxy file per domain, and issues/renews certificates with the [lego](https://go-acme.github.io/lego/) ACME client.
 
+![nginx-proxy-man-logo](./proxy-man.jpg)
+
 ## Features
 
 - Installs stable Nginx from nginx.org and the GoAccess terminal log analyzer on apt, dnf, or yum systems
