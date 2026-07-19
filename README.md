@@ -17,8 +17,8 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - Optional public cache for static assets, plus an opt-in private cache zone
 - Separate buffered access log per domain, including request and upstream timing data
 - Interactive per-domain traffic analysis with the GoAccess TUI
-- HTTP-01 certificate issuance after checking the domain's public A record
-- Domain listing with ACME status, plus non-interactive certificate renewal for cron
+- HTTP-01 certificate issuance after checking the domain's public A record, with opt-in DNS-01 through any lego-supported provider
+- Domain listing with ACME challenge status, plus non-interactive certificate renewal for cron
 
 ## Requirements
 
@@ -66,7 +66,7 @@ NGINX_DIR=/etc/nginx
 ACME_EMAIL=admin@example.com
 ```
 
-`NGINX_DIR` defaults to `/etc/nginx`; `ACME_EMAIL` is intentionally empty by default. A relative `NGINX_DIR` is resolved from the project directory. For local generation/testing, use:
+`NGINX_DIR` defaults to `/etc/nginx`; `ACME_EMAIL` is intentionally empty by default. A relative `NGINX_DIR` is resolved from the project directory. The file is also where DNS-provider credentials are set when using DNS-01; lego reads its provider-specific environment variables directly. For local generation/testing, use:
 
 ```dotenv
 NGINX_DIR=./nginx
@@ -93,6 +93,8 @@ Commands prompt for omitted values. Domain and upstream can also be supplied dir
 sudo ./proxy-man.sh proxy app.example.com http://127.0.0.1:3000
 sudo ./proxy-man.sh list
 sudo ./proxy-man.sh acme app.example.com
+sudo ./proxy-man.sh acme app.example.com --dns cloudflare
+sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
 sudo ./proxy-man.sh analyze app.example.com
 ```
 
@@ -185,19 +187,20 @@ Opens the GoAccess terminal dashboard for the domain's current access log. `goac
 
 ```bash
 sudo ./proxy-man.sh acme app.example.com
+sudo ./proxy-man.sh acme app.example.com --dns cloudflare
 ```
 
-The command:
+HTTP-01 is the default. It validates that the proxy exists, resolves and checks the domain's public A record with `dig`, and warns when it does not contain the server's detected public IPv4. It then runs lego using the HTTP webroot under `acme-webroot/`. HTTP port 80 must remain reachable during issuance and renewal. The A-record mismatch is only a warning because a CDN or load balancer can forward the challenge.
 
-1. Validates that the proxy exists
-2. Resolves and checks the domain's public A record with `dig`
-3. Warns if the A records do not contain the server's detected public IPv4
-4. Runs lego with the HTTP-01 webroot under `acme-webroot/`
-5. Replaces the domain certificate and private key only after lego succeeds
-6. Tests and reloads Nginx
-7. Adds the domain once to `acme-domains.txt`
+DNS-01 is used **only** when `--dns <lego-provider>` is supplied. Put that provider's [lego DNS environment variables](https://go-acme.github.io/lego/dns/) in the script-side `.env` file; for example, `CLOUDFLARE_DNS_API_TOKEN` for `--dns cloudflare`. `.env` is loaded for both manual issuance and `cron`, so DNS-01 renewals use the same credentials. Use a least-privilege, zone-scoped token and keep `.env` mode `0600`.
 
-The A-record mismatch is a warning because a correctly configured CDN or load balancer can still forward the challenge. HTTP port 80 must remain reachable during issuance and renewal.
+Wildcard names require DNS-01 and do not require a matching proxy file:
+
+```bash
+sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
+```
+
+Lego stores wildcard files with `*` replaced by `_`; proxy-man installs the result under `ssl/_.example.com/`. Point any hand-written wildcard Nginx server at that directory. After a successful issuance, proxy-man tests and reloads Nginx and records the domain's challenge method in `acme-domains.txt`. Records use `domain<TAB>http` or `domain<TAB>dns<TAB>provider`; old one-column records remain HTTP-01 compatible.
 
 ### `cron`
 
@@ -205,7 +208,7 @@ The A-record mismatch is a warning because a correctly configured CDN or load ba
 sudo ./proxy-man.sh cron
 ```
 
-Reads `acme-domains.txt`, asks lego to renew certificates expiring within 30 days, and installs successful results. After processing every domain, it tests the complete configuration once and reloads Nginx once, so a batch renewal does not test or reload separately for each certificate. It uses a lock directory to prevent overlapping runs.
+Reads `acme-domains.txt`, including each domain's recorded HTTP-01 or DNS-01 provider, asks lego to renew certificates expiring within 30 days, and installs successful results. It loads `.env` before running, so provider credentials are available to DNS-01 renewals. After processing every domain, it tests the complete configuration once and reloads Nginx once, so a batch renewal does not test or reload separately for each certificate. It uses a lock directory to prevent overlapping runs.
 
 Add it to root's crontab with the **absolute path** to this checkout:
 
@@ -249,7 +252,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ./proxy-man.sh init
 ./proxy-man.sh proxy [domain] [upstream-url]
 ./proxy-man.sh list
-./proxy-man.sh acme [domain]
+./proxy-man.sh acme [domain] [--dns provider]
 ./proxy-man.sh analyze [domain]
 ./proxy-man.sh cron
 ```
