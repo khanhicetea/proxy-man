@@ -13,7 +13,7 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 NGINX_DIR=${NGINX_DIR:-/etc/nginx}
-ACME_EMAIL=${ACME_EMAIL:-proxyman@example.com}
+ACME_EMAIL=${ACME_EMAIL:-}
 if [[ "$NGINX_DIR" != /* ]]; then
   NGINX_DIR="$SCRIPT_DIR/${NGINX_DIR#./}"
 fi
@@ -254,8 +254,27 @@ install_lego() {
   rm -rf "$tmp"
 }
 
+ensure_env_file() {
+  # Keep configuration beside the standalone script, including when it was
+  # downloaded with curl rather than checked out from a repository.
+  if [[ -e "$ENV_FILE" || -L "$ENV_FILE" ]]; then
+    return 0
+  fi
+
+  cat > "$ENV_FILE" <<'EOF'
+# Nginx configuration root. Use ./nginx for safe local development/testing.
+NGINX_DIR=/etc/nginx
+
+# Email used to register the Let's Encrypt/ACME account. Leave empty to skip ACME.
+ACME_EMAIL=
+EOF
+  chmod 0600 "$ENV_FILE"
+  log "Created $ENV_FILE. Set ACME_EMAIL before requesting ACME certificates."
+}
+
 command_install() {
   require_root
+  ensure_env_file
   if command -v apt-get >/dev/null 2>&1; then
     install_nginx_apt
   elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
@@ -380,9 +399,9 @@ http {
     }
 
     proxy_cache_path "$PUBLIC_CACHE_DIR" levels=1:2 keys_zone=public_zone:50m
-                     max_size=10g inactive=30d use_temp_path=off;
+                     max_size=5g inactive=30d use_temp_path=off;
     proxy_cache_path "$PRIVATE_CACHE_DIR" levels=1:2 keys_zone=private_zone:50m
-                     max_size=10g inactive=30d use_temp_path=off;
+                     max_size=1g inactive=7d use_temp_path=off;
 
     include "$CONF_DIR/*.conf";
 }
@@ -568,6 +587,9 @@ EOF
 
 command_init() {
   require_config_root
+  if [[ -z "$ACME_EMAIL" ]]; then
+    warn "ACME_EMAIL is empty. Set it in $ENV_FILE before using '$0 acme' to obtain TLS certificates."
+  fi
   install -d -m 0755 "$NGINX_DIR" "$CONF_DIR" "$SNIPPET_DIR" "$SSL_DIR" \
     "$ACME_WEBROOT/.well-known/acme-challenge" "$PUBLIC_CACHE_DIR" \
     "$PRIVATE_CACHE_DIR" "$LOG_DIR" "$LEGO_DIR"

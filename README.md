@@ -29,9 +29,32 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 
 The generated configuration uses the current Nginx HTTP/3 directives. Use the nginx.org package installed by this tool rather than an older distribution build.
 
+## Standalone download
+
+The tool is a single shell file. Download and run it without cloning the repository:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/proxy-man.sh
+chmod +x proxy-man.sh
+sudo ./proxy-man.sh install
+```
+
+`install` creates `.env` next to `proxy-man.sh` when it does not already exist:
+
+```dotenv
+NGINX_DIR=/etc/nginx
+ACME_EMAIL=
+```
+
+Set an email before requesting ACME/TLS certificates:
+
+```bash
+sudoedit .env
+```
+
 ## Configuration
 
-Copy the example and edit it:
+The script reads `.env` beside `proxy-man.sh`. `install` creates it automatically, but you can also create it before installation from `.env.example`:
 
 ```bash
 cp .env.example .env
@@ -43,7 +66,7 @@ NGINX_DIR=/etc/nginx
 ACME_EMAIL=admin@example.com
 ```
 
-Defaults are `/etc/nginx` and `proxyman@example.com`. A relative `NGINX_DIR` is resolved from the project directory. For local generation/testing, use:
+`NGINX_DIR` defaults to `/etc/nginx`; `ACME_EMAIL` is intentionally empty by default. A relative `NGINX_DIR` is resolved from the project directory. For local generation/testing, use:
 
 ```dotenv
 NGINX_DIR=./nginx
@@ -55,8 +78,10 @@ ACME_EMAIL=admin@example.com
 ## Quick start
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/proxy-man.sh
 chmod +x proxy-man.sh
 sudo ./proxy-man.sh install
+sudoedit .env # Set ACME_EMAIL before using ACME/TLS.
 sudo ./proxy-man.sh init
 sudo ./proxy-man.sh proxy
 sudo ./proxy-man.sh acme
@@ -77,7 +102,7 @@ sudo ./proxy-man.sh analyze app.example.com
 sudo ./proxy-man.sh install
 ```
 
-Adds the official stable nginx.org repository, installs Nginx, GoAccess, and DNS/TLS utilities, then downloads the latest lego binary to `/usr/local/bin/lego`. On RHEL-compatible systems, EPEL is enabled if GoAccess is not already available.
+Creates `.env` beside the script if it is missing, with `NGINX_DIR=/etc/nginx` and an empty `ACME_EMAIL`. It then adds the official stable nginx.org repository, installs Nginx, GoAccess, and DNS/TLS utilities, and downloads the latest lego binary to `/usr/local/bin/lego`. On RHEL-compatible systems, EPEL is enabled if GoAccess is not already available.
 
 It also installs production proxy tuning in:
 
@@ -95,7 +120,7 @@ These settings raise Nginx's open-file limit to 65,535 and tune socket queues, e
 sudo ./proxy-man.sh init
 ```
 
-Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. It also installs logrotate when needed and writes `/etc/logrotate.d/nginx` for system configuration roots. Nginx logs are checked daily, rotated once they reach 100 MiB, compressed, and limited to two retained rotations; Nginx is signaled to reopen its logs after rotation. Development trees outside `/etc`, `/usr`, and `/var` skip system logrotate setup.
+Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. If `ACME_EMAIL` is empty, it prints a warning; initialization continues with self-signed certificates, but set the email in `.env` before using `acme`. It also installs logrotate when needed and writes `/etc/logrotate.d/nginx` for system configuration roots. Nginx logs are checked daily, rotated once they reach 100 MiB, compressed, and limited to two retained rotations; Nginx is signaled to reopen its logs after rotation. Development trees outside `/etc`, `/usr`, and `/var` skip system logrotate setup.
 
 The upstream template contains commented examples using documentation-only test IPs and upstream keepalive settings; later `init` runs preserve it so configured upstreams are not lost. An existing `nginx.conf` is backed up with a timestamp. The package's `conf.d/default.conf`, when present, is renamed with a `.disabled.<timestamp>` suffix to prevent a default-server conflict. On a production `/etc/nginx` installation, Nginx is enabled and restarted after a successful configuration test.
 
