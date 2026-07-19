@@ -18,6 +18,7 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - Separate buffered access log per domain, including request and upstream timing data
 - Interactive per-domain traffic analysis with the GoAccess TUI
 - HTTP-01 certificate issuance after checking the domain's public A record, with opt-in DNS-01 through any lego-supported provider
+- One-command health dashboard for domains, upstream reachability and latency, certificate expiry, Nginx state, and recent errors
 - Domain listing with ACME challenge status, plus non-interactive certificate renewal for cron
 
 ## Requirements
@@ -92,6 +93,7 @@ Commands prompt for omitted values. Domain and upstream can also be supplied dir
 ```bash
 sudo ./proxy-man.sh proxy app.example.com http://127.0.0.1:3000
 sudo ./proxy-man.sh list
+sudo ./proxy-man.sh status
 sudo ./proxy-man.sh acme app.example.com
 sudo ./proxy-man.sh acme app.example.com --dns cloudflare
 sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
@@ -122,7 +124,7 @@ These settings raise Nginx's open-file limit to 65,535 and tune socket queues, e
 sudo ./proxy-man.sh init
 ```
 
-Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. If `ACME_EMAIL` is empty, it prints a warning; initialization continues with self-signed certificates, but set the email in `.env` before using `acme`. It also installs logrotate when needed and writes `/etc/logrotate.d/nginx` for system configuration roots. Nginx logs are checked daily, rotated once they reach 100 MiB, compressed, and limited to two retained rotations; Nginx is signaled to reopen its logs after rotation. Development trees outside `/etc`, `/usr`, and `/var` skip system logrotate setup.
+Creates the directory layout, default self-signed certificate, snippets, cache, logs, catch-all 404 hosts, an editable `upstreams.conf` template, and `nginx.conf`. If `ACME_EMAIL` is empty, it prints a warning; initialization continues with self-signed certificates, but set the email in `.env` before using `acme`. It also installs logrotate when needed and writes `/etc/logrotate.d/nginx` for system configuration roots. Nginx logs are checked daily, rotated once they reach 100 MiB, compressed, and limited to two retained rotations; Nginx is signaled to reopen its logs after rotation. Development trees outside `/etc`, `/usr`, and `/var` skip system logrotate setup. The generated default HTTP and HTTPS hosts expose Nginx `stub_status` at `/status` only to `127.0.0.1`; all other clients receive an access denial.
 
 The upstream template contains commented examples using documentation-only test IPs and upstream keepalive settings; later `init` runs preserve it so configured upstreams are not lost. An existing `nginx.conf` is backed up with a timestamp. The package's `conf.d/default.conf`, when present, is renamed with a `.disabled.<timestamp>` suffix to prevent a default-server conflict. On a production `/etc/nginx` installation, Nginx is enabled and restarted after a successful configuration test.
 
@@ -174,6 +176,14 @@ sudo ./proxy-man.sh list
 ```
 
 Lists every domain-named `conf.d/*.conf` file in a two-column table. The `ACME` column is `yes` when the domain is registered in `acme-domains.txt` for certificate renewal.
+
+### `status`
+
+```bash
+sudo ./proxy-man.sh status
+```
+
+Prints a health dashboard for every configured proxy domain. It calls Nginx's local-only `http://127.0.0.1/status` endpoint and prints its `stub_status` connection metrics. Each upstream is requested directly at its configured origin with a 3-second connect timeout and 5-second total timeout; the result includes the HTTP status and total request latency. The command also shows each installed certificate's expiration date and days remaining, whether Nginx is running, and the number of `error`-or-higher entries in the current Nginx error log from the last 24 hours. An HTTP response of any status confirms upstream reachability; `DOWN` means the origin could not be reached within the check. Run `init` once after upgrading to add `/status` to an existing generated configuration.
 
 ### `analyze`
 
@@ -252,6 +262,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ./proxy-man.sh init
 ./proxy-man.sh proxy [domain] [upstream-url]
 ./proxy-man.sh list
+./proxy-man.sh status
 ./proxy-man.sh acme [domain] [--dns provider]
 ./proxy-man.sh analyze [domain]
 ./proxy-man.sh cron
