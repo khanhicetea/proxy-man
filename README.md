@@ -20,6 +20,7 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - HTTP-01 certificate issuance after checking the domain's public A record, with opt-in DNS-01 through any lego-supported provider
 - One-command health dashboard for domains, upstream reachability and latency, certificate expiry, Nginx state, and recent errors
 - Domain listing with ACME challenge status, plus non-interactive certificate renewal for cron
+- Public GeoLite2 City database setup with automatic Tuesday/Friday updates
 
 ## Requirements
 
@@ -98,6 +99,7 @@ sudo ./proxy-man.sh acme app.example.com
 sudo ./proxy-man.sh acme app.example.com --dns cloudflare
 sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
 sudo ./proxy-man.sh analyze app.example.com
+sudo ./proxy-man.sh geoip2
 ```
 
 ### `install`
@@ -135,6 +137,7 @@ Important generated paths (using the production default `NGINX_DIR=/etc/nginx`):
 /etc/nginx/conf.d/00-default.conf
 /etc/nginx/conf.d/upstreams.conf
 /etc/nginx/snippets/proxy-host.conf
+/etc/nginx/snippets/proxy-geoip.conf
 /etc/nginx/snippets/block-bot-map.conf
 /etc/nginx/snippets/block-bot.conf
 /etc/nginx/ssl/default/
@@ -212,6 +215,46 @@ sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
 
 Lego stores wildcard files with `*` replaced by `_`; proxy-man installs the result under `ssl/_.example.com/`. Point any hand-written wildcard Nginx server at that directory. After a successful issuance, proxy-man tests and reloads Nginx and records the domain's challenge method in `acme-domains.txt`. Records use `domain<TAB>http` or `domain<TAB>dns<TAB>provider`; old one-column records remain HTTP-01 compatible.
 
+### `geoip2`
+
+```bash
+sudo ./proxy-man.sh geoip2
+```
+
+On Debian/Ubuntu (`apt`) systems, this installs the build dependencies and compiles the GeoIP2 dynamic module against the installed Nginx version. Distribution package `libnginx-mod-http-geoip2` cannot be used with the nginx.org package because its required `nginx-abi-*` version differs. The command then downloads and unpacks the public [GeoLite2 City database](https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz) from jsDelivr. No MaxMind account, license key, or `geoipupdate` is required. The City database also contains country data, so one database provides both country and city variables.
+
+After a successful download, it loads the built GeoIP2 module and writes `/etc/nginx/conf.d/geoip2.conf` (adjust the path if `NGINX_DIR` is customized). That file is included at HTTP scope and defines variables only; it does not add headers, deny requests, or otherwise change any proxy behavior. The command validates the complete Nginx configuration before reload and restores its Nginx changes if the module cannot be loaded. Re-run `geoip2` after upgrading Nginx so the dynamic module is rebuilt for that version.
+
+To pass country and city to an upstream, include the generated snippet in the desired proxy `location`:
+
+```nginx
+location / {
+    include /etc/nginx/snippets/proxy-geoip.conf;
+    proxy_pass http://app;
+}
+```
+
+The snippet sends these headers:
+
+```nginx
+proxy_set_header X-GeoIP-Country $geoip2_data_country_code;
+proxy_set_header X-GeoIP-City $geoip2_data_city_name;
+```
+
+It also repeats the normal proxy forwarding headers, because location-level `proxy_set_header` directives replace inherited header directives. Generated proxy files contain this include as a commented option after `geoip2` has been run. The available variables are:
+
+```text
+$geoip2_data_country_code
+$geoip2_data_country_name
+$geoip2_data_continent_code
+$geoip2_data_city_name
+$geoip2_data_city_subdivision
+$geoip2_data_city_latitude
+$geoip2_data_city_longitude
+```
+
+It installs `/usr/local/sbin/nginx-proxy-man-geoip2-update` and `/etc/cron.d/nginx-proxy-man-geoip2` to download the database every Tuesday and Friday at 04:17. Downloads are installed atomically, and the HTTP configuration uses `auto_reload 4h`, so updated databases are picked up without a reload.
+
 ### `cron`
 
 ```bash
@@ -248,8 +291,9 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ## Operational notes
 
 - Back up `/etc/nginx` before first use on a server with an existing hand-written configuration.
-- `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, the two `block-bot*.conf` snippets, and `/etc/logrotate.d/nginx` for system configuration roots. It creates `upstreams.conf` only when missing, preserving later edits.
+- `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, `snippets/proxy-geoip.conf`, the two `block-bot*.conf` snippets, and `/etc/logrotate.d/nginx` for system configuration roots. It creates `upstreams.conf` only when missing, preserving later edits.
 - `install` owns the `99-nginx-proxy-man` sysctl/limits files and the Nginx systemd limit override.
+- `geoip2` owns `/usr/share/GeoIP/GeoLite2-City.mmdb`, `/usr/local/sbin/nginx-proxy-man-geoip2-update`, `/etc/cron.d/nginx-proxy-man-geoip2`, `modules-enabled/ngx_http_geoip2_module.so`, the generated `conf.d/geoip2.conf`, and `modules-enabled/50-geoip2.conf`; it also writes `snippets/proxy-geoip.conf`.
 - A proxy file is only removed automatically when Nginx rejects a newly created configuration. An existing proxy replacement is never performed without confirmation.
 - Certificate private keys are written with mode `0600`.
 - lego account and certificate state is stored under `${NGINX_DIR}/lego` and should be included in backups.
@@ -266,4 +310,5 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ./proxy-man.sh acme [domain] [--dns provider]
 ./proxy-man.sh analyze [domain]
 ./proxy-man.sh cron
+./proxy-man.sh geoip2
 ```
