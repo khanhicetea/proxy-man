@@ -21,6 +21,7 @@ A small Bash tool for installing and managing an Nginx reverse-proxy server. It 
 - One-command health dashboard for domains, upstream reachability and latency, certificate expiry, Nginx state, and recent errors
 - Domain listing with ACME challenge status, plus non-interactive certificate renewal for cron
 - Public GeoLite2 City database setup with automatic Tuesday/Friday updates
+- Optional on-demand proxy provisioning through a secret HTTPS path and [adnanh/webhook](https://github.com/adnanh/webhook)
 
 ## Requirements
 
@@ -100,6 +101,7 @@ sudo ./proxy-man.sh acme app.example.com --dns cloudflare
 sudo ./proxy-man.sh acme '*.example.com' --dns cloudflare
 sudo ./proxy-man.sh analyze app.example.com
 sudo ./proxy-man.sh geoip2
+sudo ./proxy-man.sh ondemand setup
 ```
 
 ### `install`
@@ -255,6 +257,85 @@ $geoip2_data_city_longitude
 
 It installs `/usr/local/sbin/nginx-proxy-man-geoip2-update` and `/etc/cron.d/nginx-proxy-man-geoip2` to download the database every Tuesday and Friday at 04:17. Downloads are installed atomically, and the HTTP configuration uses `auto_reload 4h`, so updated databases are picked up without a reload.
 
+### `ondemand`
+
+```bash
+sudo ./proxy-man.sh ondemand setup
+sudo ./proxy-man.sh ondemand show
+sudo ./proxy-man.sh ondemand disable
+```
+
+Exposes a secret path on the default HTTP/HTTPS catch-all host and runs [adnanh/webhook](https://github.com/adnanh/webhook) on `127.0.0.1` only. External backends can create proxy vhosts by POSTing JSON; the handler renders an operator-controlled template from `templates/`, writes `conf.d/<domain>.conf`, optionally runs ACME synchronously, then POSTs a result to `callback_url` when provided. Implemented in pure Bash (no Python).
+
+`ondemand setup`:
+
+- installs `webhook` from the system package manager (`apt`/`dnf`/`yum`); if that fails, install a release from https://github.com/adnanh/webhook/releases yourself and re-run setup
+- generates `ONDEMAND_TOKEN` and `ONDEMAND_SECRET` into `.env` (use `--rotate` to replace existing values)
+- writes `$NGINX_DIR/ondemand/hooks.json` and a `proxy-man-webhook` systemd unit listening on `127.0.0.1:$ONDEMAND_PORT` (default `9000`); Nginx `proxy_read_timeout` for the location is 300s so synchronous ACME can finish
+- creates `templates/default.tpl` when missing
+- injects `location = /_ondemand/<token>` into `conf.d/00-default.conf` with `access_log off`
+
+Authenticate every request with the shared secret header. The path token alone is not sufficient:
+
+```http
+POST /_ondemand/<ONDEMAND_TOKEN>
+Content-Type: application/json
+X-Proxy-Man-Token: <ONDEMAND_SECRET>
+```
+
+Payload:
+
+```json
+{
+  "template": "default.tpl",
+  "domain": "app-123.example.com",
+  "upstream": "http://127.0.0.1:3000",
+  "acme": true,
+  "replace": false,
+  "callback_url": "https://backend.example.com/hooks/proxy-result"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `template` | yes | Basename only under `templates/`, must end in `.tpl` |
+| `domain` | yes | Same validation as `proxy` |
+| `upstream` | yes | Origin URL, same validation as `proxy` |
+| `acme` | no | Default `false`; HTTP-01 only, synchronous |
+| `replace` | no | Default `false`; refuse to overwrite an existing `conf.d/<domain>.conf` unless `true` |
+| `callback_url` | no | Best-effort JSON POST with the final result |
+
+Template placeholders: `__DOMAIN__`, `__UPSTREAM__`, `__ACME_WEBROOT__`, `__SSL_DIR__`, `__LOG_DIR__`, `__SNIPPET_DIR__`, `__NGINX_DIR__`.
+
+Example:
+
+```bash
+curl -X POST "https://server.example.com/_ondemand/$ONDEMAND_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "X-Proxy-Man-Token: $ONDEMAND_SECRET" \
+  -d '{
+    "template": "default.tpl",
+    "domain": "app-123.example.com",
+    "upstream": "http://127.0.0.1:3000",
+    "acme": true
+  }'
+```
+
+Successful handler response/callback body:
+
+```json
+{
+  "domain": "app-123.example.com",
+  "status": "ok",
+  "code": 0,
+  "message": "Proxy ready for app-123.example.com",
+  "acme": "issued",
+  "config": "/etc/nginx/conf.d/app-123.example.com.conf"
+}
+```
+
+`acme` is one of `issued`, `skipped`, `failed`, or `n/a`. Keep `.env` mode `0600`. Templates are operator-owned; callers cannot supply raw Nginx config. `ondemand webhook` is invoked by webhook itself and is not an interactive command. `ondemand disable` removes the public location and stops the unit but leaves tokens and templates in place.
+
 ### `cron`
 
 ```bash
@@ -294,6 +375,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 - `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, `snippets/proxy-geoip.conf`, the two `block-bot*.conf` snippets, and `/etc/logrotate.d/nginx` for system configuration roots. It creates `upstreams.conf` only when missing, preserving later edits.
 - `install` owns the `99-nginx-proxy-man` sysctl/limits files and the Nginx systemd limit override.
 - `geoip2` owns `/usr/share/GeoIP/GeoLite2-City.mmdb`, `/usr/local/sbin/nginx-proxy-man-geoip2-update`, `/etc/cron.d/nginx-proxy-man-geoip2`, `modules-enabled/ngx_http_geoip2_module.so`, the generated `conf.d/geoip2.conf`, and `modules-enabled/50-geoip2.conf`; it also writes `snippets/proxy-geoip.conf`.
+- `ondemand setup` owns `templates/default.tpl` (created only when missing), `$NGINX_DIR/ondemand/hooks.json`, `/etc/systemd/system/proxy-man-webhook.service`, and the on-demand location inside `conf.d/00-default.conf`; it also writes `ONDEMAND_TOKEN`, `ONDEMAND_SECRET`, and `ONDEMAND_PORT` into `.env`.
 - A proxy file is only removed automatically when Nginx rejects a newly created configuration. An existing proxy replacement is never performed without confirmation.
 - Certificate private keys are written with mode `0600`.
 - lego account and certificate state is stored under `${NGINX_DIR}/lego` and should be included in backups.
@@ -311,4 +393,7 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 ./proxy-man.sh analyze [domain]
 ./proxy-man.sh cron
 ./proxy-man.sh geoip2
+./proxy-man.sh ondemand setup [--rotate]
+./proxy-man.sh ondemand show
+./proxy-man.sh ondemand disable
 ```
