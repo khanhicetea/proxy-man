@@ -34,10 +34,10 @@ The generated configuration uses the current Nginx HTTP/3 directives. Use the ng
 
 ## Standalone download
 
-The tool is a single shell file. Download and run it without cloning the repository:
+The published artifact is a single shell file built from `src/`. Download it without cloning the repository:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/proxy-man.sh
+curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/dist/proxy-man.sh
 chmod +x proxy-man.sh
 sudo ./proxy-man.sh install
 ```
@@ -81,7 +81,7 @@ ACME_EMAIL=admin@example.com
 ## Quick start
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/proxy-man.sh
+curl -fsSLO https://raw.githubusercontent.com/khanhicetea/proxy-man/main/dist/proxy-man.sh
 chmod +x proxy-man.sh
 sudo ./proxy-man.sh install
 sudoedit .env # Set ACME_EMAIL before using ACME/TLS.
@@ -380,6 +380,21 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 - Certificate private keys are written with mode `0600`.
 - lego account and certificate state is stored under `${NGINX_DIR}/lego` and should be included in backups.
 - HTTP/3 requires UDP/443 and a client/network path that supports QUIC; HTTPS continues to work over TCP when QUIC is unavailable.
+
+## Development
+
+Source lives under `src/` and is concatenated into the standalone artifact `dist/proxy-man.sh`.
+
+```bash
+git clone git@github.com:khanhicetea/proxy-man.git
+cd proxy-man
+./scripts/setup-hooks.sh   # enable pre-commit rebuild of dist/
+./scripts/build.sh         # write dist/proxy-man.sh
+./proxy-man.sh help        # repo launcher; sources src/ with SCRIPT_DIR=repo root
+./dist/proxy-man.sh help   # same commands from the published single-file build
+```
+
+The pre-commit hook runs `scripts/build.sh` and stages `dist/proxy-man.sh` whenever it changes, so commits keep the downloadable artifact in sync with `src/`.
 
 ## Command summary
 

@@ -1,3 +1,4 @@
 .env
 nginx/
 *.log
+dist/.proxy-man.sh.*
