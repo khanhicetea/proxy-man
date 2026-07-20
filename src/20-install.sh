@@ -147,6 +147,11 @@ LEGO_DNS_RESOLVERS=1.1.1.1:53,1.0.0.1:53
 # ONDEMAND_TOKEN=
 # ONDEMAND_SECRET=
 # ONDEMAND_PORT=9000
+# Optional executable run after each ondemand webhook finishes (success or failure).
+# Receives the result JSON on stdin and in ONDEMAND_TRIGGER_JSON; also sets
+# ONDEMAND_TRIGGER_CODE, ONDEMAND_TRIGGER_DOMAIN, ONDEMAND_TRIGGER_CONFIG,
+# ONDEMAND_TRIGGER_ACTION, and ONDEMAND_TRIGGER_STATUS.
+# ONDEMAND_TRIGGER=/usr/local/bin/proxy-man-ondemand-hook
 EOF
   chmod 0600 "$ENV_FILE"
   log "Created $ENV_FILE. Set ACME_EMAIL before requesting ACME certificates."

@@ -24,6 +24,10 @@ command_proxy() {
   if prompt_yes_no "Enable WebSocket forwarding?" y; then websocket=y; else websocket=n; fi
   if prompt_yes_no "Cache static files for 30 days?" y; then cache=y; else cache=n; fi
 
+  if [[ -e "$ONDEMAND_CONF_DIR/$domain.conf" ]]; then
+    die "Domain $domain is managed by ondemand ($ONDEMAND_CONF_DIR/$domain.conf). Delete it via ondemand or remove that file first."
+  fi
+
   config="$CONF_DIR/$domain.conf"
   if [[ -e "$config" ]]; then
     if ! prompt_yes_no "$config exists. Replace it?" n; then

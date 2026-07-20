@@ -12,18 +12,12 @@ acme_record_status() {
 command_list() {
   [[ -d "$CONF_DIR" ]] || die "Run '$0 init' first."
 
-  local file domain acme width=6
+  local domain acme width=6
   local -a domains=()
-  shopt -s nullglob
-  for file in "$CONF_DIR"/*.conf; do
-    domain=${file##*/}
-    domain=${domain%.conf}
-    if validate_domain "$domain"; then
-      domains+=("$domain")
-      (( ${#domain} > width )) && width=${#domain}
-    fi
-  done
-  shopt -u nullglob
+  while IFS= read -r domain; do
+    domains+=("$domain")
+    (( ${#domain} > width )) && width=${#domain}
+  done < <(list_proxy_domains)
 
   printf '%-*s  %s\n' "$width" DOMAIN ACME
   printf '%-*s  %s\n' "$width" "$(printf '%*s' "$width" '' | tr ' ' '-')" '----'
@@ -82,6 +76,8 @@ recent_nginx_error_count() {
 }
 
 upstream_for_domain() {
+  local conf
+  conf=$(proxy_conf_for_domain "$1") || return 1
   awk '
     /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\// {
       upstream = $2
@@ -89,7 +85,7 @@ upstream_for_domain() {
       print upstream
       exit
     }
-  ' "$CONF_DIR/$1.conf"
+  ' "$conf"
 }
 
 upstream_health() {
@@ -135,17 +131,13 @@ certificate_status() {
 command_status() {
   [[ -d "$CONF_DIR" ]] || die "Run '$0 init' first."
 
-  local file domain upstream health certificate nginx_state local_status error_count line
+  local domain upstream health certificate nginx_state local_status error_count line
   local domain_width=6 upstream_width=8 certificate_width=11
   local -a domains=() upstream_cells=() certificate_cells=()
-  shopt -s nullglob
-  for file in "$CONF_DIR"/*.conf; do
-    domain=${file##*/}
-    domain=${domain%.conf}
-    validate_domain "$domain" || continue
+  while IFS= read -r domain; do
     domains+=("$domain")
 
-    upstream=$(upstream_for_domain "$domain")
+    upstream=$(upstream_for_domain "$domain" || true)
     if [[ -n "$upstream" ]]; then
       health=$(upstream_health "$upstream")
       upstream="$upstream — $health"
@@ -158,8 +150,7 @@ command_status() {
     (( ${#domain} > domain_width )) && domain_width=${#domain}
     (( ${#upstream} > upstream_width )) && upstream_width=${#upstream}
     (( ${#certificate} > certificate_width )) && certificate_width=${#certificate}
-  done
-  shopt -u nullglob
+  done < <(list_proxy_domains)
 
   nginx_state=$(nginx_status)
   local_status=$(nginx_local_status)
@@ -188,7 +179,7 @@ command_analyze() {
   [[ -n "$domain" ]] || domain=$(prompt_value "Domain to analyze")
   domain=${domain,,}
   validate_domain "$domain" || die "Invalid domain: $domain"
-  [[ -f "$CONF_DIR/$domain.conf" ]] || die "No proxy configuration exists for $domain."
+  proxy_conf_for_domain "$domain" >/dev/null || die "No proxy configuration exists for $domain."
 
   access_log="$LOG_DIR/$domain.access.log"
   [[ -f "$access_log" ]] || die "No access log exists for $domain yet: $access_log"

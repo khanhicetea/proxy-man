@@ -138,6 +138,7 @@ Important generated paths (using the production default `NGINX_DIR=/etc/nginx`):
 /etc/nginx/nginx.conf
 /etc/nginx/conf.d/00-default.conf
 /etc/nginx/conf.d/upstreams.conf
+/etc/nginx/conf.d/ondemand/
 /etc/nginx/snippets/proxy-host.conf
 /etc/nginx/snippets/proxy-geoip.conf
 /etc/nginx/snippets/block-bot-map.conf
@@ -265,14 +266,16 @@ sudo ./proxy-man.sh ondemand show
 sudo ./proxy-man.sh ondemand disable
 ```
 
-Exposes a secret path on the default HTTP/HTTPS catch-all host and runs [adnanh/webhook](https://github.com/adnanh/webhook) on `127.0.0.1` only. External backends can create proxy vhosts by POSTing JSON; the handler renders an operator-controlled template from `templates/`, writes `conf.d/<domain>.conf`, optionally runs ACME synchronously, then POSTs a result to `callback_url` when provided. Implemented in pure Bash (no Python).
+Exposes a secret path on the default HTTP/HTTPS catch-all host and runs [adnanh/webhook](https://github.com/adnanh/webhook) on `127.0.0.1` only. External backends can create proxy vhosts by POSTing JSON; the handler renders an operator-controlled [gomplate](https://docs.gomplate.ca/) template from `templates/` with a JSON context, writes `conf.d/ondemand/<domain>.conf`, optionally runs ACME synchronously, then POSTs a result to `callback_url` when provided. After every webhook finish (success or failure), an optional `ONDEMAND_TRIGGER` executable from `.env` is invoked. Implemented in pure Bash (no Python).
 
 `ondemand setup`:
 
 - installs `webhook` from the system package manager (`apt`/`dnf`/`yum`); if that fails, install a release from https://github.com/adnanh/webhook/releases yourself and re-run setup
+- installs [gomplate](https://github.com/hairyhenderson/gomplate) `v5.2.0` to `/usr/local/bin/gomplate` (linux `amd64`/`arm64`, SHA-256 verified) when it is not already on `PATH`
 - generates `ONDEMAND_TOKEN` and `ONDEMAND_SECRET` into `.env` (use `--rotate` to replace existing values)
 - writes `$NGINX_DIR/ondemand/hooks.json` and a `proxy-man-webhook` systemd unit listening on `127.0.0.1:$ONDEMAND_PORT` (default `9000`); Nginx `proxy_read_timeout` for the location is 300s so synchronous ACME can finish
-- creates `templates/default.tpl` when missing
+- ensures `conf.d/ondemand/` exists (with a placeholder conf so Nginx's include glob is never empty) and requires `nginx.conf` to include `conf.d/ondemand/*.conf` (re-run `init` if missing)
+- creates `templates/default.tpl` when missing (gomplate/Go template syntax)
 - injects `location = /_ondemand/<token>` into `conf.d/00-default.conf` with `access_log off`
 
 Authenticate every request with the shared secret header. The path token alone is not sufficient:
@@ -287,6 +290,7 @@ Payload:
 
 ```json
 {
+  "action": "create",
   "template": "default.tpl",
   "domain": "app-123.example.com",
   "upstream": "http://127.0.0.1:3000",
@@ -298,26 +302,67 @@ Payload:
 
 | Field | Required | Notes |
 |---|---|---|
-| `template` | yes | Basename only under `templates/`, must end in `.tpl` |
+| `action` | no | `create` (default) or `delete` |
+| `template` | create | Basename only under `templates/`, must end in `.tpl` |
 | `domain` | yes | Same validation as `proxy` |
-| `upstream` | yes | Origin URL, same validation as `proxy` |
-| `acme` | no | Default `false`; HTTP-01 only, synchronous |
-| `replace` | no | Default `false`; refuse to overwrite an existing `conf.d/<domain>.conf` unless `true` |
+| `upstream` | create | Origin URL, same validation as `proxy` |
+| `acme` | no | Default `false`; HTTP-01 only, synchronous; ignored for `delete` |
+| `replace` | no | Default `false`; refuse to overwrite an existing `conf.d/ondemand/<domain>.conf` unless `true`; ignored for `delete` |
 | `callback_url` | no | Best-effort JSON POST with the final result |
 
-Template placeholders: `__DOMAIN__`, `__UPSTREAM__`, `__ACME_WEBROOT__`, `__SSL_DIR__`, `__LOG_DIR__`, `__SNIPPET_DIR__`, `__NGINX_DIR__`.
+Created conf files live only under `conf.d/ondemand/<domain>.conf`. That subdirectory is what marks a vhost as on-demand: `action=delete` removes `$NGINX_DIR/conf.d/ondemand/<domain>.conf` and never touches `conf.d/<domain>.conf` from `proxy` or hand edits. Create also refuses if `conf.d/<domain>.conf` already exists. Certificates and ACME records are left in place.
 
-Example:
+Optional post-hook: set `ONDEMAND_TRIGGER=/path/to/executable` in `.env`. After each webhook completes (ok or error), proxy-man runs that program with the result JSON on stdin. Environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `ONDEMAND_TRIGGER_JSON` | Full result JSON |
+| `ONDEMAND_TRIGGER_CODE` | `0` success / non-zero failure |
+| `ONDEMAND_TRIGGER_STATUS` | `ok` or `error` |
+| `ONDEMAND_TRIGGER_DOMAIN` | Requested domain |
+| `ONDEMAND_TRIGGER_CONFIG` | Conf path (when known) |
+| `ONDEMAND_TRIGGER_ACTION` | `create` or `delete` |
+
+Trigger stdout/stderr is discarded so the webhook HTTP body stays pure JSON. A non-zero trigger exit only logs a warning.
+
+Templates are rendered with gomplate (`gomplate -f <template> -c .=stdin:?type=application/json`) and a JSON context. Common variables:
+
+| Variable | Source |
+|---|---|
+| `.domain` | request `domain` |
+| `.upstream` | request `upstream` |
+| `.acme_webroot` | ACME HTTP-01 webroot path |
+| `.ssl_dir` | TLS certificate root |
+| `.log_dir` | access/error log directory |
+| `.snippet_dir` | shared Nginx snippets |
+| `.nginx_dir` | Nginx configuration root |
+
+Example usage in a template: `server_name {{ .domain }};` and `ssl_certificate "{{ .ssl_dir }}/{{ .domain }}/fullchain.pem";`. The stock `default.tpl` header comments list the same variables.
+
+Example create:
 
 ```bash
 curl -X POST "https://server.example.com/_ondemand/$ONDEMAND_TOKEN" \
   -H 'Content-Type: application/json' \
   -H "X-Proxy-Man-Token: $ONDEMAND_SECRET" \
   -d '{
+    "action": "create",
     "template": "default.tpl",
     "domain": "app-123.example.com",
     "upstream": "http://127.0.0.1:3000",
     "acme": true
+  }'
+```
+
+Example delete:
+
+```bash
+curl -X POST "https://server.example.com/_ondemand/$ONDEMAND_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "X-Proxy-Man-Token: $ONDEMAND_SECRET" \
+  -d '{
+    "action": "delete",
+    "domain": "app-123.example.com"
   }'
 ```
 
@@ -330,11 +375,12 @@ Successful handler response/callback body:
   "code": 0,
   "message": "Proxy ready for app-123.example.com",
   "acme": "issued",
-  "config": "/etc/nginx/conf.d/app-123.example.com.conf"
+  "config": "/etc/nginx/conf.d/ondemand/app-123.example.com.conf",
+  "action": "create"
 }
 ```
 
-`acme` is one of `issued`, `skipped`, `failed`, or `n/a`. Keep `.env` mode `0600`. Templates are operator-owned; callers cannot supply raw Nginx config. `ondemand webhook` is invoked by webhook itself and is not an interactive command. `ondemand disable` removes the public location and stops the unit but leaves tokens and templates in place.
+`acme` is one of `issued`, `skipped`, `failed`, or `n/a`. Keep `.env` mode `0600`. Templates are operator-owned; callers cannot supply raw Nginx config. `ondemand webhook` is invoked by webhook itself and is not an interactive command. `ondemand disable` removes the public location and stops the unit but leaves tokens, templates, and ondemand vhosts in place.
 
 ### `cron`
 
@@ -375,8 +421,9 @@ TLS is limited to TLS 1.2 and 1.3 with ECDHE, AES-GCM, and ChaCha20-Poly1305 sui
 - `init` owns `nginx.conf`, `00-default.conf`, `snippets/proxy-host.conf`, `snippets/proxy-geoip.conf`, the two `block-bot*.conf` snippets, and `/etc/logrotate.d/nginx` for system configuration roots. It creates `upstreams.conf` only when missing, preserving later edits.
 - `install` owns the `99-nginx-proxy-man` sysctl/limits files and the Nginx systemd limit override.
 - `geoip2` owns `/usr/share/GeoIP/GeoLite2-City.mmdb`, `/usr/local/sbin/nginx-proxy-man-geoip2-update`, `/etc/cron.d/nginx-proxy-man-geoip2`, `modules-enabled/ngx_http_geoip2_module.so`, the generated `conf.d/geoip2.conf`, and `modules-enabled/50-geoip2.conf`; it also writes `snippets/proxy-geoip.conf`.
-- `ondemand setup` owns `templates/default.tpl` (created only when missing), `$NGINX_DIR/ondemand/hooks.json`, `/etc/systemd/system/proxy-man-webhook.service`, and the on-demand location inside `conf.d/00-default.conf`; it also writes `ONDEMAND_TOKEN`, `ONDEMAND_SECRET`, and `ONDEMAND_PORT` into `.env`.
-- A proxy file is only removed automatically when Nginx rejects a newly created configuration. An existing proxy replacement is never performed without confirmation.
+- `init` creates `conf.d/ondemand/` (with `00-placeholder.conf`) and adds `include conf.d/ondemand/*.conf` to `nginx.conf`.
+- `ondemand setup` owns `templates/default.tpl` (created only when missing), `$NGINX_DIR/ondemand/hooks.json`, `/etc/systemd/system/proxy-man-webhook.service`, `/usr/local/bin/gomplate` when installed by setup, and the on-demand location inside `conf.d/00-default.conf`; it also writes `ONDEMAND_TOKEN`, `ONDEMAND_SECRET`, and `ONDEMAND_PORT` into `.env`. Optional `ONDEMAND_TRIGGER` is operator-managed in `.env`.
+- On-demand vhosts are stored as `conf.d/ondemand/<domain>.conf`. A proxy file is only removed automatically when Nginx rejects a newly created configuration, or when on-demand `action=delete` targets that subdirectory. An existing proxy replacement is never performed without `replace=true`.
 - Certificate private keys are written with mode `0600`.
 - lego account and certificate state is stored under `${NGINX_DIR}/lego` and should be included in backups.
 - HTTP/3 requires UDP/443 and a client/network path that supports QUIC; HTTPS continues to work over TCP when QUIC is unavailable.

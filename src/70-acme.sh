@@ -130,7 +130,8 @@ command_acme() {
   validate_acme_domain "$domain" || die "Invalid domain: $domain"
   [[ "$ACME_EMAIL" == *@*.* ]] || die "Set a valid ACME_EMAIL in $ENV_FILE."
   if ! is_wildcard_domain "$domain"; then
-    [[ -f "$CONF_DIR/$domain.conf" ]] || die "Create the proxy first with '$0 proxy $domain'."
+    proxy_conf_for_domain "$domain" >/dev/null \
+      || die "Create the proxy first with '$0 proxy $domain' or ondemand."
   fi
 
   if [[ "$method" == dns ]]; then
@@ -167,7 +168,7 @@ renew_one_domain() {
     warn "Skipping $domain: invalid or missing DNS provider."
     return 1
   fi
-  if ! is_wildcard_domain "$domain" && [[ ! -f "$CONF_DIR/$domain.conf" ]]; then
+  if ! is_wildcard_domain "$domain" && ! proxy_conf_for_domain "$domain" >/dev/null; then
     warn "Skipping $domain: proxy configuration is missing."
     return 1
   fi

@@ -19,7 +19,7 @@ Commands:
   cron                    Renew all recorded certificates when due
   geoip2                  Build GeoIP2 support and configure the public GeoLite2 City database
   ondemand setup [--rotate]
-                          Install webhook and expose /_ondemand/<token>
+                          Install webhook + gomplate and expose /_ondemand/<token>
   ondemand show           Show on-demand endpoint and service status
   ondemand disable        Remove the public on-demand endpoint and stop webhook
   ondemand webhook        Internal handler invoked by webhook (not for humans)
@@ -94,6 +94,36 @@ validate_acme_domain() {
 lego_certificate_name() {
   # lego stores wildcard certificates with `*` replaced by `_`.
   printf '%s' "${1//\*/_}"
+}
+
+# Resolve conf.d/<domain>.conf or conf.d/ondemand/<domain>.conf.
+proxy_conf_for_domain() {
+  local domain=$1
+  if [[ -f "$ONDEMAND_CONF_DIR/$domain.conf" ]]; then
+    printf '%s\n' "$ONDEMAND_CONF_DIR/$domain.conf"
+    return 0
+  fi
+  if [[ -f "$CONF_DIR/$domain.conf" ]]; then
+    printf '%s\n' "$CONF_DIR/$domain.conf"
+    return 0
+  fi
+  return 1
+}
+
+# Print validated proxy domains from conf.d and conf.d/ondemand (unique).
+list_proxy_domains() {
+  local file domain
+  local -A seen=()
+  shopt -s nullglob
+  for file in "$CONF_DIR"/*.conf "$ONDEMAND_CONF_DIR"/*.conf; do
+    domain=${file##*/}
+    domain=${domain%.conf}
+    validate_domain "$domain" || continue
+    [[ -z ${seen[$domain]+x} ]] || continue
+    seen[$domain]=1
+    printf '%s\n' "$domain"
+  done
+  shopt -u nullglob
 }
 
 nginx_test() {

@@ -49,10 +49,12 @@ GEOIP2_UPDATE_SCRIPT=/usr/local/sbin/nginx-proxy-man-geoip2-update
 GEOIP2_CRON_FILE=/etc/cron.d/nginx-proxy-man-geoip2
 TEMPLATE_DIR="$NGINX_DIR/templates"
 ONDEMAND_DIR="$NGINX_DIR/ondemand"
+ONDEMAND_CONF_DIR="$CONF_DIR/ondemand"
 ONDEMAND_HOOK_ID=proxy-man-ondemand
 ONDEMAND_PORT=${ONDEMAND_PORT:-9000}
 ONDEMAND_TOKEN=${ONDEMAND_TOKEN:-}
 ONDEMAND_SECRET=${ONDEMAND_SECRET:-}
+ONDEMAND_TRIGGER=${ONDEMAND_TRIGGER:-}
 WEBHOOK_UNIT_PATH=/etc/systemd/system/proxy-man-webhook.service
 
 log() { printf '[proxy-man] %s\n' "$*"; }
@@ -76,7 +78,7 @@ Commands:
   cron                    Renew all recorded certificates when due
   geoip2                  Build GeoIP2 support and configure the public GeoLite2 City database
   ondemand setup [--rotate]
-                          Install webhook and expose /_ondemand/<token>
+                          Install webhook + gomplate and expose /_ondemand/<token>
   ondemand show           Show on-demand endpoint and service status
   ondemand disable        Remove the public on-demand endpoint and stop webhook
   ondemand webhook        Internal handler invoked by webhook (not for humans)
@@ -151,6 +153,36 @@ validate_acme_domain() {
 lego_certificate_name() {
   # lego stores wildcard certificates with `*` replaced by `_`.
   printf '%s' "${1//\*/_}"
+}
+
+# Resolve conf.d/<domain>.conf or conf.d/ondemand/<domain>.conf.
+proxy_conf_for_domain() {
+  local domain=$1
+  if [[ -f "$ONDEMAND_CONF_DIR/$domain.conf" ]]; then
+    printf '%s\n' "$ONDEMAND_CONF_DIR/$domain.conf"
+    return 0
+  fi
+  if [[ -f "$CONF_DIR/$domain.conf" ]]; then
+    printf '%s\n' "$CONF_DIR/$domain.conf"
+    return 0
+  fi
+  return 1
+}
+
+# Print validated proxy domains from conf.d and conf.d/ondemand (unique).
+list_proxy_domains() {
+  local file domain
+  local -A seen=()
+  shopt -s nullglob
+  for file in "$CONF_DIR"/*.conf "$ONDEMAND_CONF_DIR"/*.conf; do
+    domain=${file##*/}
+    domain=${domain%.conf}
+    validate_domain "$domain" || continue
+    [[ -z ${seen[$domain]+x} ]] || continue
+    seen[$domain]=1
+    printf '%s\n' "$domain"
+  done
+  shopt -u nullglob
 }
 
 nginx_test() {
@@ -321,6 +353,11 @@ LEGO_DNS_RESOLVERS=1.1.1.1:53,1.0.0.1:53
 # ONDEMAND_TOKEN=
 # ONDEMAND_SECRET=
 # ONDEMAND_PORT=9000
+# Optional executable run after each ondemand webhook finishes (success or failure).
+# Receives the result JSON on stdin and in ONDEMAND_TRIGGER_JSON; also sets
+# ONDEMAND_TRIGGER_CODE, ONDEMAND_TRIGGER_DOMAIN, ONDEMAND_TRIGGER_CONFIG,
+# ONDEMAND_TRIGGER_ACTION, and ONDEMAND_TRIGGER_STATUS.
+# ONDEMAND_TRIGGER=/usr/local/bin/proxy-man-ondemand-hook
 EOF
   chmod 0600 "$ENV_FILE"
   log "Created $ENV_FILE. Set ACME_EMAIL before requesting ACME certificates."
@@ -653,8 +690,23 @@ http {
                      max_size=1g inactive=7d use_temp_path=off;
 
     include "$CONF_DIR/*.conf";
+    include "$ONDEMAND_CONF_DIR/*.conf";
 }
 EOF
+}
+
+ensure_ondemand_conf_dir() {
+  # Nginx fails the include glob when the directory is empty, so keep a harmless
+  # placeholder that list/status skip (not a valid domain name).
+  install -d -m 0755 "$ONDEMAND_CONF_DIR"
+  local placeholder="$ONDEMAND_CONF_DIR/00-placeholder.conf"
+  if [[ ! -e "$placeholder" ]]; then
+    cat > "$placeholder" <<EOF
+# Managed by nginx-proxy-man.
+# Placeholder so include $ONDEMAND_CONF_DIR/*.conf always matches at least one file.
+EOF
+    chmod 0644 "$placeholder"
+  fi
 }
 
 write_upstreams_conf() {
@@ -899,6 +951,7 @@ command_init() {
   install -d -m 0755 "$NGINX_DIR" "$CONF_DIR" "$SNIPPET_DIR" "$SSL_DIR" \
     "$GEOIP2_MODULES_DIR" "$ACME_WEBROOT/.well-known/acme-challenge" "$PUBLIC_CACHE_DIR" \
     "$PRIVATE_CACHE_DIR" "$LOG_DIR" "$LEGO_DIR" "$TEMPLATE_DIR" "$ONDEMAND_DIR"
+  ensure_ondemand_conf_dir
 
   if [[ -f "$NGINX_DIR/nginx.conf" ]]; then
     cp -a "$NGINX_DIR/nginx.conf" "$NGINX_DIR/nginx.conf.bak.$(date +%Y%m%d%H%M%S)"
@@ -956,6 +1009,10 @@ command_proxy() {
 
   if prompt_yes_no "Enable WebSocket forwarding?" y; then websocket=y; else websocket=n; fi
   if prompt_yes_no "Cache static files for 30 days?" y; then cache=y; else cache=n; fi
+
+  if [[ -e "$ONDEMAND_CONF_DIR/$domain.conf" ]]; then
+    die "Domain $domain is managed by ondemand ($ONDEMAND_CONF_DIR/$domain.conf). Delete it via ondemand or remove that file first."
+  fi
 
   config="$CONF_DIR/$domain.conf"
   if [[ -e "$config" ]]; then
@@ -1063,18 +1120,12 @@ acme_record_status() {
 command_list() {
   [[ -d "$CONF_DIR" ]] || die "Run '$0 init' first."
 
-  local file domain acme width=6
+  local domain acme width=6
   local -a domains=()
-  shopt -s nullglob
-  for file in "$CONF_DIR"/*.conf; do
-    domain=${file##*/}
-    domain=${domain%.conf}
-    if validate_domain "$domain"; then
-      domains+=("$domain")
-      (( ${#domain} > width )) && width=${#domain}
-    fi
-  done
-  shopt -u nullglob
+  while IFS= read -r domain; do
+    domains+=("$domain")
+    (( ${#domain} > width )) && width=${#domain}
+  done < <(list_proxy_domains)
 
   printf '%-*s  %s\n' "$width" DOMAIN ACME
   printf '%-*s  %s\n' "$width" "$(printf '%*s' "$width" '' | tr ' ' '-')" '----'
@@ -1133,6 +1184,8 @@ recent_nginx_error_count() {
 }
 
 upstream_for_domain() {
+  local conf
+  conf=$(proxy_conf_for_domain "$1") || return 1
   awk '
     /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\// {
       upstream = $2
@@ -1140,7 +1193,7 @@ upstream_for_domain() {
       print upstream
       exit
     }
-  ' "$CONF_DIR/$1.conf"
+  ' "$conf"
 }
 
 upstream_health() {
@@ -1186,17 +1239,13 @@ certificate_status() {
 command_status() {
   [[ -d "$CONF_DIR" ]] || die "Run '$0 init' first."
 
-  local file domain upstream health certificate nginx_state local_status error_count line
+  local domain upstream health certificate nginx_state local_status error_count line
   local domain_width=6 upstream_width=8 certificate_width=11
   local -a domains=() upstream_cells=() certificate_cells=()
-  shopt -s nullglob
-  for file in "$CONF_DIR"/*.conf; do
-    domain=${file##*/}
-    domain=${domain%.conf}
-    validate_domain "$domain" || continue
+  while IFS= read -r domain; do
     domains+=("$domain")
 
-    upstream=$(upstream_for_domain "$domain")
+    upstream=$(upstream_for_domain "$domain" || true)
     if [[ -n "$upstream" ]]; then
       health=$(upstream_health "$upstream")
       upstream="$upstream — $health"
@@ -1209,8 +1258,7 @@ command_status() {
     (( ${#domain} > domain_width )) && domain_width=${#domain}
     (( ${#upstream} > upstream_width )) && upstream_width=${#upstream}
     (( ${#certificate} > certificate_width )) && certificate_width=${#certificate}
-  done
-  shopt -u nullglob
+  done < <(list_proxy_domains)
 
   nginx_state=$(nginx_status)
   local_status=$(nginx_local_status)
@@ -1239,7 +1287,7 @@ command_analyze() {
   [[ -n "$domain" ]] || domain=$(prompt_value "Domain to analyze")
   domain=${domain,,}
   validate_domain "$domain" || die "Invalid domain: $domain"
-  [[ -f "$CONF_DIR/$domain.conf" ]] || die "No proxy configuration exists for $domain."
+  proxy_conf_for_domain "$domain" >/dev/null || die "No proxy configuration exists for $domain."
 
   access_log="$LOG_DIR/$domain.access.log"
   [[ -f "$access_log" ]] || die "No access log exists for $domain yet: $access_log"
@@ -1382,7 +1430,8 @@ command_acme() {
   validate_acme_domain "$domain" || die "Invalid domain: $domain"
   [[ "$ACME_EMAIL" == *@*.* ]] || die "Set a valid ACME_EMAIL in $ENV_FILE."
   if ! is_wildcard_domain "$domain"; then
-    [[ -f "$CONF_DIR/$domain.conf" ]] || die "Create the proxy first with '$0 proxy $domain'."
+    proxy_conf_for_domain "$domain" >/dev/null \
+      || die "Create the proxy first with '$0 proxy $domain' or ondemand."
   fi
 
   if [[ "$method" == dns ]]; then
@@ -1419,7 +1468,7 @@ renew_one_domain() {
     warn "Skipping $domain: invalid or missing DNS provider."
     return 1
   fi
-  if ! is_wildcard_domain "$domain" && [[ ! -f "$CONF_DIR/$domain.conf" ]]; then
+  if ! is_wildcard_domain "$domain" && ! proxy_conf_for_domain "$domain" >/dev/null; then
     warn "Skipping $domain: proxy configuration is missing."
     return 1
   fi
@@ -1507,21 +1556,81 @@ install_webhook() {
   log "Installed webhook: $(command -v webhook) ($(webhook -version 2>&1 || true))"
 }
 
+install_gomplate() {
+  local machine arch url sha256 tmp expected actual
+  local version=v5.2.0
+  if command -v gomplate >/dev/null 2>&1; then
+    log "gomplate already installed: $(command -v gomplate) ($(gomplate --version 2>&1 || true))"
+    return 0
+  fi
+
+  machine=$(uname -m)
+  case "$machine" in
+    x86_64|amd64)
+      arch=amd64
+      sha256=a235564c12f12e755c06e3ab2af414ab1e3f5b1f142eb82ea2d8086145670a81
+      ;;
+    aarch64|arm64)
+      arch=arm64
+      sha256=f445888455c30fa80a3ddce1643baadcdbe1a0207eb6c0de300a38a2c3fb64a2
+      ;;
+    *) die "gomplate has no configured download for architecture: $machine" ;;
+  esac
+
+  url="https://github.com/hairyhenderson/gomplate/releases/download/${version}/gomplate_linux-${arch}"
+  tmp=$(mktemp -d)
+  log "Downloading gomplate ${version} (${arch})..."
+  if ! curl -fsSL "$url" -o "$tmp/gomplate"; then
+    rm -rf "$tmp"
+    die "Failed to download gomplate from $url"
+  fi
+
+  actual=$(sha256sum "$tmp/gomplate" | awk '{print $1}')
+  expected=$sha256
+  if [[ "$actual" != "$expected" ]]; then
+    rm -rf "$tmp"
+    die "gomplate checksum mismatch (expected $expected, got $actual)"
+  fi
+
+  install -m 0755 "$tmp/gomplate" /usr/local/bin/gomplate
+  rm -rf "$tmp"
+  command -v gomplate >/dev/null 2>&1 || die "gomplate install failed."
+  log "Installed gomplate: $(command -v gomplate) ($(gomplate --version 2>&1 || true))"
+}
+
 write_default_ondemand_template() {
   install -d -m 0755 "$TEMPLATE_DIR"
   local tpl="$TEMPLATE_DIR/default.tpl"
   [[ -e "$tpl" ]] && return 0
   cat > "$tpl" <<'EOF'
-# On-demand vhost template.
-# Placeholders: DOMAIN, UPSTREAM, ACME_WEBROOT, SSL_DIR, LOG_DIR, SNIPPET_DIR, NGINX_DIR
-# (each wrapped in double underscores when used below).
+{{/*
+  On-demand vhost template (gomplate).
+
+  Rendered by `ondemand webhook` with JSON context piped into gomplate
+  (`gomplate -f <template> -c .=stdin:?type=application/json`). Use Go template syntax:
+    {{ .domain }}  {{ .upstream }}  {{ .ssl_dir }}/{{ .domain }}/fullchain.pem
+
+  Common variables (always present):
+    .domain         Requested server_name (validated)
+    .upstream       proxy_pass origin URL (validated)
+    .acme_webroot   ACME HTTP-01 webroot directory
+    .ssl_dir        TLS certificate root (per-domain subdirs)
+    .log_dir        Access/error log directory
+    .snippet_dir    Shared Nginx snippets directory
+    .nginx_dir      Nginx configuration root
+
+  Rendered files are written to conf.d/ondemand/<domain>.conf only
+  (subdir membership is what marks a vhost as on-demand).
+
+  Docs: https://docs.gomplate.ca/
+*/}}
 server {
     listen 80;
     listen [::]:80;
-    server_name __DOMAIN__;
+    server_name {{ .domain }};
 
     location ^~ /.well-known/acme-challenge/ {
-        root "__ACME_WEBROOT__";
+        root "{{ .acme_webroot }}";
         default_type text/plain;
         try_files $uri =404;
     }
@@ -1529,20 +1638,20 @@ server {
 }
 
 server {
-    include "__SNIPPET_DIR__/proxy-host.conf";
+    include "{{ .snippet_dir }}/proxy-host.conf";
 
     # Optional UA filter; review block-bot-map.conf before enabling.
-    # include "__SNIPPET_DIR__/block-bot.conf";
+    # include "{{ .snippet_dir }}/block-bot.conf";
 
-    server_name __DOMAIN__;
-    ssl_certificate "__SSL_DIR__/__DOMAIN__/fullchain.pem";
-    ssl_certificate_key "__SSL_DIR__/__DOMAIN__/privkey.pem";
+    server_name {{ .domain }};
+    ssl_certificate "{{ .ssl_dir }}/{{ .domain }}/fullchain.pem";
+    ssl_certificate_key "{{ .ssl_dir }}/{{ .domain }}/privkey.pem";
 
     location / {
         # Optional GeoIP2 headers for the upstream (after running geoip2):
-        # include "__SNIPPET_DIR__/proxy-geoip.conf";
-        access_log "__LOG_DIR__/__DOMAIN__.access.log" proxy_timing buffer=64k flush=60s;
-        proxy_pass __UPSTREAM__;
+        # include "{{ .snippet_dir }}/proxy-geoip.conf";
+        access_log "{{ .log_dir }}/{{ .domain }}.access.log" proxy_timing buffer=64k flush=60s;
+        proxy_pass {{ .upstream }};
     }
 }
 EOF
@@ -1571,6 +1680,7 @@ write_ondemand_hooks() {
       {"source": "string", "name": "webhook"}
     ],
     "pass-environment-to-command": [
+      {"source": "payload", "name": "action", "envname": "OD_ACTION"},
       {"source": "payload", "name": "template", "envname": "OD_TEMPLATE"},
       {"source": "payload", "name": "domain", "envname": "OD_DOMAIN"},
       {"source": "payload", "name": "upstream", "envname": "OD_UPSTREAM"},
@@ -1632,12 +1742,22 @@ ondemand_setup() {
   [[ -f "$NGINX_DIR/nginx.conf" && -f "$CONF_DIR/00-default.conf" ]] || die "Run '$0 init' first."
 
   install_webhook
+  install_gomplate
   # Avoid the package unit binding :9000 if someone later drops /etc/webhook.conf.
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl disable --now webhook.service 2>/dev/null || true
   fi
   install -d -m 0755 "$TEMPLATE_DIR" "$ONDEMAND_DIR"
+  ensure_ondemand_conf_dir
+  if ! grep -qF "include \"$ONDEMAND_CONF_DIR/*.conf\"" "$NGINX_DIR/nginx.conf" 2>/dev/null \
+    && ! grep -qE 'include[[:space:]]+.*/ondemand/\*\.conf' "$NGINX_DIR/nginx.conf" 2>/dev/null; then
+    die "nginx.conf is missing the ondemand conf include. Re-run '$0 init' then '$0 ondemand setup'."
+  fi
   write_default_ondemand_template
+  if [[ -n "$ONDEMAND_TRIGGER" ]]; then
+    [[ -f "$ONDEMAND_TRIGGER" && -x "$ONDEMAND_TRIGGER" ]] \
+      || warn "ONDEMAND_TRIGGER is set but not an executable file: $ONDEMAND_TRIGGER"
+  fi
 
   if [[ "$rotate" == y || -z "$ONDEMAND_TOKEN" ]]; then
     ONDEMAND_TOKEN=$(generate_random_token 32)
@@ -1672,11 +1792,17 @@ ondemand_setup() {
   log "On-demand endpoint path: /_ondemand/${ONDEMAND_TOKEN}"
   log "Authenticate requests with header: X-Proxy-Man-Token: <ONDEMAND_SECRET from $ENV_FILE>"
   log "Templates directory: $TEMPLATE_DIR"
+  log "On-demand vhost directory: $ONDEMAND_CONF_DIR"
+  if [[ -n "$ONDEMAND_TRIGGER" ]]; then
+    log "Post-webhook trigger: $ONDEMAND_TRIGGER"
+  else
+    log "Post-webhook trigger: (unset; optional ONDEMAND_TRIGGER in $ENV_FILE)"
+  fi
   log "Example:"
   log "  curl -X POST \"https://<host>/_ondemand/${ONDEMAND_TOKEN}\" \\"
   log "    -H 'Content-Type: application/json' \\"
   log "    -H \"X-Proxy-Man-Token: \$ONDEMAND_SECRET\" \\"
-  log "    -d '{\"template\":\"default.tpl\",\"domain\":\"app.example.com\",\"upstream\":\"http://127.0.0.1:3000\",\"acme\":true}'"
+  log "    -d '{\"action\":\"create\",\"template\":\"default.tpl\",\"domain\":\"app.example.com\",\"upstream\":\"http://127.0.0.1:3000\",\"acme\":true}'"
 }
 
 ondemand_disable() {
@@ -1710,6 +1836,13 @@ ondemand_show() {
   printf '  webhook listen: 127.0.0.1:%s\n' "$ONDEMAND_PORT"
   printf '  hooks file: %s (%s)\n' "$hooks_file" "$([[ -f "$hooks_file" ]] && printf present || printf missing)"
   printf '  templates dir: %s\n' "$TEMPLATE_DIR"
+  printf '  vhost dir: %s\n' "$ONDEMAND_CONF_DIR"
+  if [[ -n "$ONDEMAND_TRIGGER" ]]; then
+    printf '  trigger: %s (%s)\n' "$ONDEMAND_TRIGGER" \
+      "$([[ -x "$ONDEMAND_TRIGGER" ]] && printf executable || printf 'missing or not executable')"
+  else
+    printf '  trigger: (unset)\n'
+  fi
 
   if [[ -d "$TEMPLATE_DIR" ]]; then
     shopt -s nullglob
@@ -1741,13 +1874,14 @@ ondemand_emit_result() {
   local status=$1 message=$2 acme_state=${3:-n/a} code=1 json
   [[ "$status" == ok ]] && code=0
   printf -v json \
-    '{"domain":"%s","status":"%s","code":%s,"message":"%s","acme":"%s","config":"%s"}' \
+    '{"domain":"%s","status":"%s","code":%s,"message":"%s","acme":"%s","config":"%s","action":"%s"}' \
     "$(json_escape "${ONDEMAND_CB_DOMAIN:-}")" \
     "$(json_escape "$status")" \
     "$code" \
     "$(json_escape "$message")" \
     "$(json_escape "$acme_state")" \
-    "$(json_escape "${ONDEMAND_CB_CONFIG:-}")"
+    "$(json_escape "${ONDEMAND_CB_CONFIG:-}")" \
+    "$(json_escape "${ONDEMAND_CB_ACTION:-}")"
 
   if [[ -n "${ONDEMAND_CB_URL:-}" ]]; then
     if [[ "$ONDEMAND_CB_URL" =~ ^https?://[^[:space:]]+$ ]]; then
@@ -1760,7 +1894,32 @@ ondemand_emit_result() {
       warn "Ignoring invalid callback_url: $ONDEMAND_CB_URL"
     fi
   fi
+  ONDEMAND_LAST_RESULT_JSON=$json
+  ONDEMAND_LAST_RESULT_CODE=$code
+  ONDEMAND_LAST_RESULT_STATUS=$status
   printf '%s\n' "$json"
+}
+
+ondemand_run_trigger() {
+  local json=${1:-} code=${2:-1} status=${3:-} trigger=${ONDEMAND_TRIGGER:-}
+  [[ -n "$trigger" ]] || return 0
+  if [[ ! -f "$trigger" || ! -x "$trigger" ]]; then
+    warn "ONDEMAND_TRIGGER is not an executable file: $trigger"
+    return 0
+  fi
+  [[ -n "$status" ]] || { [[ "$code" -eq 0 ]] && status=ok || status=error; }
+  log "Running ONDEMAND_TRIGGER ($status/$code): $trigger"
+  # stdout/stderr discarded so webhook HTTP body stays pure JSON.
+  if ! printf '%s\n' "$json" | \
+    ONDEMAND_TRIGGER_JSON="$json" \
+    ONDEMAND_TRIGGER_CODE="$code" \
+    ONDEMAND_TRIGGER_STATUS="$status" \
+    ONDEMAND_TRIGGER_DOMAIN="${ONDEMAND_CB_DOMAIN:-}" \
+    ONDEMAND_TRIGGER_CONFIG="${ONDEMAND_CB_CONFIG:-}" \
+    ONDEMAND_TRIGGER_ACTION="${ONDEMAND_CB_ACTION:-}" \
+    "$trigger" >/dev/null 2>&1; then
+    warn "ONDEMAND_TRIGGER exited non-zero: $trigger"
+  fi
 }
 
 ondemand_provision_acme() {
@@ -1781,27 +1940,145 @@ ondemand_provision_acme() {
 }
 
 ondemand_render_template() {
-  local template_path=$1 output_path=$2 domain=$3 upstream=$4 line
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line=${line//__DOMAIN__/$domain}
-    line=${line//__UPSTREAM__/$upstream}
-    line=${line//__ACME_WEBROOT__/$ACME_WEBROOT}
-    line=${line//__SSL_DIR__/$SSL_DIR}
-    line=${line//__LOG_DIR__/$LOG_DIR}
-    line=${line//__SNIPPET_DIR__/$SNIPPET_DIR}
-    line=${line//__NGINX_DIR__/$NGINX_DIR}
-    printf '%s\n' "$line"
-  done < "$template_path" > "$output_path"
+  local template_path=$1 output_path=$2 domain=$3 upstream=$4 data
+  if ! command -v gomplate >/dev/null 2>&1; then
+    warn "gomplate is not installed; run '$0 ondemand setup'"
+    return 1
+  fi
+  printf -v data \
+    '{"domain":"%s","upstream":"%s","acme_webroot":"%s","ssl_dir":"%s","log_dir":"%s","snippet_dir":"%s","nginx_dir":"%s"}' \
+    "$(json_escape "$domain")" \
+    "$(json_escape "$upstream")" \
+    "$(json_escape "$ACME_WEBROOT")" \
+    "$(json_escape "$SSL_DIR")" \
+    "$(json_escape "$LOG_DIR")" \
+    "$(json_escape "$SNIPPET_DIR")" \
+    "$(json_escape "$NGINX_DIR")"
+  if ! printf '%s\n' "$data" | gomplate -f "$template_path" -c .=stdin:?type=application/json -o "$output_path"; then
+    warn "gomplate failed to render $template_path"
+    return 1
+  fi
+  return 0
+}
+
+ondemand_delete_vhost() {
+  local domain=$1 config="$ONDEMAND_CONF_DIR/$domain.conf" backup
+
+  if [[ ! -f "$config" ]]; then
+    ondemand_emit_result error "On-demand proxy does not exist for $domain"
+    exit 1
+  fi
+
+  ONDEMAND_CB_CONFIG=$config
+  backup=$(mktemp)
+  cp -a "$config" "$backup"
+  rm -f "$config"
+
+  if ! reload_nginx; then
+    cp -a "$backup" "$config"
+    rm -f "$backup"
+    ondemand_emit_result error "Nginx rejected configuration after deleting $domain; previous file restored"
+    exit 1
+  fi
+  rm -f "$backup"
+  log "On-demand proxy deleted for $domain ($config)"
+  ondemand_emit_result ok "Proxy deleted for $domain"
+}
+
+ondemand_create_vhost() {
+  local domain=$1 template=$2 upstream=$3 replace=$4 want_acme=$5
+  local config template_path rendered backup='' acme_state=skipped
+
+  [[ -n "$template" ]] || { ondemand_emit_result error "template is required"; exit 1; }
+  [[ -n "$upstream" ]] || { ondemand_emit_result error "upstream is required"; exit 1; }
+  [[ "$template" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tpl$ ]] || {
+    ondemand_emit_result error "template must be a basename ending in .tpl"
+    exit 1
+  }
+  validate_upstream "$upstream" || {
+    ondemand_emit_result error "Upstream must be an origin such as http://127.0.0.1:3000"
+    exit 1
+  }
+
+  template_path="$TEMPLATE_DIR/$template"
+  [[ -f "$template_path" ]] || {
+    ondemand_emit_result error "Template not found: $template"
+    exit 1
+  }
+
+  ensure_ondemand_conf_dir
+  config="$ONDEMAND_CONF_DIR/$domain.conf"
+  ONDEMAND_CB_CONFIG=$config
+
+  if [[ -e "$CONF_DIR/$domain.conf" ]]; then
+    ondemand_emit_result error "Domain $domain already has $CONF_DIR/$domain.conf; remove it before ondemand create"
+    exit 1
+  fi
+  if [[ -e "$config" && "$replace" != y ]]; then
+    ondemand_emit_result error "Proxy already exists for $domain (pass replace=true to overwrite)"
+    exit 1
+  fi
+
+  if [[ -e "$config" ]]; then
+    backup=$(mktemp)
+    cp -a "$config" "$backup"
+  fi
+
+  ensure_domain_cert "$domain"
+  rendered=$(mktemp)
+  if ! ondemand_render_template "$template_path" "$rendered" "$domain" "$upstream"; then
+    rm -f "$rendered"
+    [[ -n "$backup" ]] && rm -f "$backup"
+    ondemand_emit_result error "Failed to render template $template"
+    exit 1
+  fi
+  cp "$rendered" "$config"
+  rm -f "$rendered"
+  chmod 0644 "$config"
+
+  if ! reload_nginx; then
+    if [[ -n "$backup" ]]; then
+      cp -a "$backup" "$config"
+      rm -f "$backup"
+      ondemand_emit_result error "Nginx rejected the new proxy configuration; previous file restored"
+    else
+      rm -f "$config"
+      ondemand_emit_result error "Nginx rejected the new proxy configuration; file removed"
+    fi
+    exit 1
+  fi
+  [[ -n "$backup" ]] && rm -f "$backup"
+  log "On-demand proxy created for $domain -> $upstream from $template ($config)"
+
+  if [[ "$want_acme" == y ]]; then
+    # Run in a subshell so helpers that call die/exit cannot skip JSON output.
+    if ( ondemand_provision_acme "$domain" ); then
+      acme_state=issued
+    else
+      acme_state=failed
+      ondemand_emit_result error "Proxy written but ACME provisioning failed" "$acme_state"
+      exit 1
+    fi
+  fi
+
+  ondemand_emit_result ok "Proxy ready for $domain" "$acme_state"
 }
 
 ondemand_webhook() {
   local domain=${OD_DOMAIN:-} template=${OD_TEMPLATE:-} upstream=${OD_UPSTREAM:-}
   local callback_url=${OD_CALLBACK_URL:-} replace_raw=${OD_REPLACE:-} acme_raw=${OD_ACME:-}
-  local config='' backup='' template_path='' rendered='' acme_state=skipped replace=n want_acme=n
+  local action=${OD_ACTION:-create}
+  local replace=n want_acme=n
 
   ONDEMAND_CB_URL=
   ONDEMAND_CB_DOMAIN=
   ONDEMAND_CB_CONFIG=
+  ONDEMAND_CB_ACTION=
+  ONDEMAND_LAST_RESULT_JSON=
+  ONDEMAND_LAST_RESULT_CODE=1
+  ONDEMAND_LAST_RESULT_STATUS=error
+  # Always run optional post-hook after success or failure (keeps webhook body JSON-only).
+  trap 'ondemand_run_trigger "${ONDEMAND_LAST_RESULT_JSON-}" "${ONDEMAND_LAST_RESULT_CODE:-1}" "${ONDEMAND_LAST_RESULT_STATUS-}"' EXIT
 
   if [[ "$NGINX_DIR" == /etc/* || "$NGINX_DIR" == /usr/* || "$NGINX_DIR" == /var/* ]]; then
     if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -1819,79 +2096,37 @@ ondemand_webhook() {
   template=${template//$'\r'/}
   upstream=${upstream//$'\r'/}
   callback_url=${callback_url//$'\r'/}
+  action=${action,,}
+  action=${action//$'\r'/}
   as_bool "$replace_raw" && replace=y
   as_bool "$acme_raw" && want_acme=y
 
   ONDEMAND_CB_URL=$callback_url
   ONDEMAND_CB_DOMAIN=$domain
+  ONDEMAND_CB_ACTION=$action
 
   [[ -n "$domain" ]] || { ondemand_emit_result error "domain is required"; exit 1; }
-  [[ -n "$template" ]] || { ondemand_emit_result error "template is required"; exit 1; }
-  [[ -n "$upstream" ]] || { ondemand_emit_result error "upstream is required"; exit 1; }
-  [[ "$template" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tpl$ ]] || {
-    ondemand_emit_result error "template must be a basename ending in .tpl"
-    exit 1
-  }
   validate_domain "$domain" || {
     ondemand_emit_result error "Invalid domain: $domain"
     exit 1
   }
-  validate_upstream "$upstream" || {
-    ondemand_emit_result error "Upstream must be an origin such as http://127.0.0.1:3000"
-    exit 1
-  }
 
-  template_path="$TEMPLATE_DIR/$template"
-  [[ -f "$template_path" ]] || {
-    ondemand_emit_result error "Template not found: $template"
-    exit 1
-  }
+  ONDEMAND_CB_CONFIG="$ONDEMAND_CONF_DIR/$domain.conf"
 
-  config="$CONF_DIR/$domain.conf"
-  ONDEMAND_CB_CONFIG=$config
-  if [[ -e "$config" && "$replace" != y ]]; then
-    ondemand_emit_result error "Proxy already exists for $domain (pass replace=true to overwrite)"
-    exit 1
-  fi
-
-  if [[ -e "$config" ]]; then
-    backup=$(mktemp)
-    cp -a "$config" "$backup"
-  fi
-
-  ensure_domain_cert "$domain"
-  rendered=$(mktemp)
-  ondemand_render_template "$template_path" "$rendered" "$domain" "$upstream"
-  cp "$rendered" "$config"
-  rm -f "$rendered"
-  chmod 0644 "$config"
-
-  if ! reload_nginx; then
-    if [[ -n "$backup" ]]; then
-      cp -a "$backup" "$config"
-      rm -f "$backup"
-      ondemand_emit_result error "Nginx rejected the new proxy configuration; previous file restored"
-    else
-      rm -f "$config"
-      ondemand_emit_result error "Nginx rejected the new proxy configuration; file removed"
-    fi
-    exit 1
-  fi
-  [[ -n "$backup" ]] && rm -f "$backup"
-  log "On-demand proxy created for $domain -> $upstream from $template"
-
-  if [[ "$want_acme" == y ]]; then
-    # Run in a subshell so helpers that call die/exit cannot skip JSON output.
-    if ( ondemand_provision_acme "$domain" ); then
-      acme_state=issued
-    else
-      acme_state=failed
-      ondemand_emit_result error "Proxy written but ACME provisioning failed" "$acme_state"
+  case "$action" in
+    create|'')
+      ONDEMAND_CB_ACTION=create
+      ondemand_create_vhost "$domain" "$template" "$upstream" "$replace" "$want_acme"
+      ;;
+    delete)
+      ONDEMAND_CB_ACTION=delete
+      ondemand_delete_vhost "$domain"
+      ;;
+    *)
+      ondemand_emit_result error "action must be create or delete"
       exit 1
-    fi
-  fi
-
-  ondemand_emit_result ok "Proxy ready for $domain" "$acme_state"
+      ;;
+  esac
 }
 
 command_ondemand() {
@@ -1907,7 +2142,7 @@ command_ondemand() {
 Usage: ./proxy-man.sh ondemand <subcommand>
 
 Subcommands:
-  setup [--rotate]   Install webhook, write hooks, expose /_ondemand/<token>
+  setup [--rotate]   Install webhook + gomplate, write hooks, expose /_ondemand/<token>
   show               Show endpoint path, templates, and webhook service status
   disable            Remove the public endpoint and stop the webhook service
   webhook            Internal handler used by adnanh/webhook

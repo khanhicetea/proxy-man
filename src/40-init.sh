@@ -114,8 +114,23 @@ http {
                      max_size=1g inactive=7d use_temp_path=off;
 
     include "$CONF_DIR/*.conf";
+    include "$ONDEMAND_CONF_DIR/*.conf";
 }
 EOF
+}
+
+ensure_ondemand_conf_dir() {
+  # Nginx fails the include glob when the directory is empty, so keep a harmless
+  # placeholder that list/status skip (not a valid domain name).
+  install -d -m 0755 "$ONDEMAND_CONF_DIR"
+  local placeholder="$ONDEMAND_CONF_DIR/00-placeholder.conf"
+  if [[ ! -e "$placeholder" ]]; then
+    cat > "$placeholder" <<EOF
+# Managed by nginx-proxy-man.
+# Placeholder so include $ONDEMAND_CONF_DIR/*.conf always matches at least one file.
+EOF
+    chmod 0644 "$placeholder"
+  fi
 }
 
 write_upstreams_conf() {
@@ -360,6 +375,7 @@ command_init() {
   install -d -m 0755 "$NGINX_DIR" "$CONF_DIR" "$SNIPPET_DIR" "$SSL_DIR" \
     "$GEOIP2_MODULES_DIR" "$ACME_WEBROOT/.well-known/acme-challenge" "$PUBLIC_CACHE_DIR" \
     "$PRIVATE_CACHE_DIR" "$LOG_DIR" "$LEGO_DIR" "$TEMPLATE_DIR" "$ONDEMAND_DIR"
+  ensure_ondemand_conf_dir
 
   if [[ -f "$NGINX_DIR/nginx.conf" ]]; then
     cp -a "$NGINX_DIR/nginx.conf" "$NGINX_DIR/nginx.conf.bak.$(date +%Y%m%d%H%M%S)"
