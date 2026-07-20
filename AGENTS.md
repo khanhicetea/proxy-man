@@ -37,4 +37,5 @@ bash -n src/*.sh proxy-man.sh
 ./scripts/build.sh
 bash -n dist/proxy-man.sh
 ./proxy-man.sh help
+./test.sh                 # isolated tmp NGINX_DIR; skips real ACME issuance
 ```
